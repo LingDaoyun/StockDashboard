@@ -19,6 +19,7 @@ struct WatchlistTests {
             catch { count += 1 }
         }
         check(store.symbols.isEmpty, "首次启动必须为空")
+        check(store.backgroundTransparency == 0.3, "首次启动背景透明度默认为30%")
         try store.addSymbols("600108,002580")
         check(store.symbols.map(\.id) == ["sh600108", "sz002580"], "追加输入的股票")
         try store.addSymbols("002491")

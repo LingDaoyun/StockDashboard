@@ -13,6 +13,7 @@ final class QuoteStore: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var isRefreshing = false
     @Published var isAddingStock = false
+    @Published var isAdjustingTransparency = false
     @Published var backgroundTransparency: Double {
         didSet { defaults.set(backgroundTransparency, forKey: "backgroundTransparency") }
     }
@@ -34,7 +35,7 @@ final class QuoteStore: ObservableObject {
         let saved = preview ?? defaults.string(forKey: "symbols") ?? ""
         self.symbols = (try? StockSymbol.parseList(saved)) ?? []
         self.isPinned = defaults.object(forKey: "pinned") as? Bool ?? false
-        self.backgroundTransparency = min(1, max(0, defaults.object(forKey: "backgroundTransparency") as? Double ?? 0.5))
+        self.backgroundTransparency = min(1, max(0, defaults.object(forKey: "backgroundTransparency") as? Double ?? 0.3))
     }
 
     var codeText: String { symbols.map(\.id).joined(separator: ", ") }
@@ -265,7 +266,7 @@ struct QuoteRow: View {
 
 struct WidgetView: View {
     @ObservedObject var store: QuoteStore
-    let settings: () -> Void
+    let transparency: () -> Void
     let add: () -> Void
     let pin: () -> Void
     let hide: () -> Void
@@ -303,9 +304,13 @@ struct WidgetView: View {
                         .onSubmit(addInline)
                         .onExitCommand { store.isAddingStock = false }
                         .onChange(of: newCode) { _ in additionError = nil }
-                        .onAppear { DispatchQueue.main.async { codeFocused = true } }
+                        .onAppear {
+                            DispatchQueue.main.async {
+                                if store.isAddingStock { codeFocused = true }
+                            }
+                        }
                         .frame(maxWidth: .infinity)
-                } else {
+                } else if !store.isAdjustingTransparency {
                     Image(systemName: "chart.xyaxis.line")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Color.accentColor)
@@ -319,7 +324,21 @@ struct WidgetView: View {
                     else { add() }
                 }
                 toolButton("pin", help: store.isPinned ? "取消置顶" : "置顶", selected: store.isPinned, action: pin)
-                toolButton("gearshape", help: "外观设置", action: settings)
+                if store.isAdjustingTransparency {
+                    HStack(spacing: 6) {
+                        Slider(value: $store.backgroundTransparency, in: 0...1)
+                            .accessibilityLabel("背景透明度")
+                            .help("0%毛玻璃，100%全透明；拖动即时生效并自动保存")
+                        Text("\(Int((store.backgroundTransparency * 100).rounded()))%")
+                            .font(.system(size: 10))
+                            .monospacedDigit()
+                            .frame(width: 30, alignment: .trailing)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                toolButton(store.isAdjustingTransparency ? "xmark" : "gearshape",
+                           help: store.isAdjustingTransparency ? "收起透明度滑条" : "调整背景透明度",
+                           action: transparency)
                 toolButton("minus", help: "隐藏浮窗（菜单栏可重新显示）", action: hide)
             }
             .padding(.horizontal, 16)
@@ -379,6 +398,10 @@ struct WidgetView: View {
         .background(Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.10), lineWidth: 1))
+        .onExitCommand {
+            store.isAddingStock = false
+            store.isAdjustingTransparency = false
+        }
         .onChange(of: store.isAddingStock) { adding in
             if !adding { codeFocused = false; newCode = ""; additionError = nil }
         }
@@ -408,48 +431,6 @@ struct WidgetView: View {
     }
 }
 
-struct SettingsView: View {
-    @ObservedObject var store: QuoteStore
-    let close: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("外观设置").font(.system(size: 21, weight: .semibold))
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("背景透明度")
-                    Spacer()
-                    Text("\(Int((store.backgroundTransparency * 100).rounded()))%")
-                        .monospacedDigit().foregroundStyle(.secondary)
-                }
-                .font(.system(size: 13))
-                Slider(value: $store.backgroundTransparency, in: 0...1)
-                    .accessibilityLabel("背景透明度")
-                HStack {
-                    Text("0% 毛玻璃")
-                    Spacer()
-                    Text("100% 全透明")
-                }
-                .font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-            Divider()
-            Text("拖动即时生效并自动保存，仅改变背景，文字保持清晰。")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Spacer()
-                Button("完成", action: close)
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(24)
-        .frame(width: 360)
-        .onExitCommand(perform: close)
-    }
-}
-
 final class DesktopPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -463,7 +444,6 @@ final class TransparentHostingView<Content: View>: NSHostingView<Content> {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var store: QuoteStore!
     private var panel: DesktopPanel!
-    private var settingsWindow: NSWindow?
     private var glassView: NSVisualEffectView?
     private var statusItem: NSStatusItem!
     private var pinItem: NSMenuItem!
@@ -514,7 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         addItem("隐藏浮窗", action: #selector(hidePanel), to: menu)
         menu.addItem(.separator())
         addItem("添加股票…", action: #selector(addStock), to: menu)
-        addItem("外观设置…", action: #selector(showSettings), to: menu)
+        addItem("背景透明度", action: #selector(toggleTransparency), to: menu)
         addItem("立即刷新", action: #selector(refresh), to: menu)
         pinItem = addItem("浮窗置顶", action: #selector(togglePin), to: menu)
         pinItem.state = store.isPinned ? .on : .off
@@ -576,7 +556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         glass.translatesAutoresizingMaskIntoConstraints = false
         surface.addSubview(glass)
         let host = TransparentHostingView(rootView: WidgetView(store: store,
-                                                               settings: { [weak self] in self?.showSettings() },
+                                                               transparency: { [weak self] in self?.toggleTransparency() },
                                                                add: { [weak self] in self?.addStock() },
                                                                pin: { [weak self] in self?.togglePin() },
                                                                hide: { [weak self] in self?.hidePanel() }))
@@ -660,6 +640,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func addStock() {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        store.isAdjustingTransparency = false
         store.isAddingStock = true
     }
 
@@ -670,28 +651,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.orderFrontRegardless()
     }
 
-    @objc private func showSettings() {
-        if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 240),
-                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.title = "A股桌面行情 · 外观设置"
-            window.isReleasedWhenClosed = false
-            let host = NSHostingView(rootView: SettingsView(store: store) { [weak window] in
-                window?.close()
-            })
-            window.contentView = host
-            window.setContentSize(host.fittingSize)
-            window.center()
-            settingsWindow = window
-        } else {
-            let host = NSHostingView(rootView: SettingsView(store: store) { [weak self] in
-                self?.settingsWindow?.close()
-            })
-            settingsWindow?.contentView = host
-            settingsWindow?.setContentSize(host.fittingSize)
-        }
+    @objc private func toggleTransparency() {
         NSApp.activate(ignoringOtherApps: true)
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        panel.makeKeyAndOrderFront(nil)
+        store.isAddingStock = false
+        store.isAdjustingTransparency.toggle()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
