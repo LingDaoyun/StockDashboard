@@ -28,6 +28,9 @@ final class QuoteStore: ObservableObject {
     @Published var isPinned: Bool {
         didSet { defaults.set(isPinned, forKey: "pinned") }
     }
+    @Published var autoHideEnabled: Bool {
+        didSet { defaults.set(autoHideEnabled, forKey: "autoHideEnabled") }
+    }
 
     let defaults: UserDefaults
     let isPreview: Bool
@@ -43,6 +46,7 @@ final class QuoteStore: ObservableObject {
         let saved = preview ?? defaults.string(forKey: "symbols") ?? ""
         self.symbols = (try? StockSymbol.parseList(saved)) ?? []
         self.isPinned = defaults.object(forKey: "pinned") as? Bool ?? false
+        self.autoHideEnabled = defaults.object(forKey: "autoHideEnabled") as? Bool ?? true
         self.backgroundTransparency = min(1, max(0, defaults.object(forKey: "backgroundTransparency") as? Double ?? 0.3))
         if let data = defaults.data(forKey: "stockTracking"),
            let savedTracking = try? JSONDecoder().decode([String: StockTracking].self, from: data) {
@@ -595,6 +599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     private var glassView: NSVisualEffectView?
     private var statusItem: NSStatusItem!
     private var pinItem: NSMenuItem!
+    private var autoHideItems: [NSMenuItem] = []
     private var subscriptions: [AnyCancellable] = []
     private var workspaceObservers: [NSObjectProtocol] = []
     private var previewDomain: String?
@@ -663,6 +668,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         addItem("立即刷新", action: #selector(refresh), to: menu)
         pinItem = addItem("浮窗置顶", action: #selector(togglePin), to: menu)
         pinItem.state = store.isPinned ? .on : .off
+        addAutoHideItem(to: menu)
         menu.addItem(.separator())
         addItem("退出A股桌面行情", action: #selector(quit), key: "q", to: menu)
         statusItem.menu = menu
@@ -672,6 +678,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         let menu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
+        addAutoHideItem(to: appMenu)
         addItem("启用提醒通知", action: #selector(prepareNotifications), to: appMenu)
         addItem("退出A股桌面行情", action: #selector(quit), key: "q", to: appMenu)
         appItem.submenu = appMenu
@@ -694,6 +701,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         item.target = self
         menu.addItem(item)
         return item
+    }
+
+    private func addAutoHideItem(to menu: NSMenu) {
+        let item = addItem("右侧自动吸附隐藏", action: #selector(toggleAutoHide), to: menu)
+        item.state = store.autoHideEnabled ? .on : .off
+        autoHideItems.append(item)
     }
 
     private func createPanel() {
@@ -755,7 +768,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
                                          y: frame.maxY - panel.frame.height - 24))
         }
         panel.delegate = self
-        edgeDock = EdgeDockController(panel: panel, surface: surface, defaults: store.defaults) { [weak self] in
+        edgeDock = EdgeDockController(panel: panel, surface: surface, defaults: store.defaults,
+                                     enabled: store.autoHideEnabled) { [weak self] in
             guard let store = self?.store else { return false }
             return store.isAddingStock || store.isAdjustingTransparency || store.expandedSymbolID != nil
         }
@@ -828,6 +842,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         panel.level = store.isPinned ? .floating : .normal
         pinItem.state = store.isPinned ? .on : .off
         edgeDock?.show()
+    }
+
+    @objc private func toggleAutoHide() {
+        store.autoHideEnabled.toggle()
+        for item in autoHideItems { item.state = store.autoHideEnabled ? .on : .off }
+        edgeDock?.setEnabled(store.autoHideEnabled)
     }
 
     @objc private func toggleTransparency() {

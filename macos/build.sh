@@ -28,8 +28,8 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>A股桌面行情</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundleShortVersionString</key><string>1.7.0</string>
-  <key>CFBundleVersion</key><string>10</string>
+  <key>CFBundleShortVersionString</key><string>1.7.1</string>
+  <key>CFBundleVersion</key><string>11</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

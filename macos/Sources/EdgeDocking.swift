@@ -27,7 +27,7 @@ private final class EdgeHandleView: DesktopHoverView {
         setAccessibilityRole(.button)
         setAccessibilityLabel("行情提示条，鼠标移入展开")
         setAccessibilityIdentifier("edge-reveal-handle")
-        toolTip = "鼠标移入展开行情；拖离桌面边缘取消贴边"
+        toolTip = "鼠标移入展开行情；菜单栏可关闭右侧自动吸附隐藏"
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -69,11 +69,13 @@ final class EdgeDockController {
     private var changingFrame = false
     private var animating = false
     private var animationGeneration = 0
+    private var enabled: Bool
 
-    init(panel: NSPanel, surface: DesktopHoverView, defaults: UserDefaults, keepVisible: @escaping () -> Bool) {
+    init(panel: NSPanel, surface: DesktopHoverView, defaults: UserDefaults, enabled: Bool, keepVisible: @escaping () -> Bool) {
         self.panel = panel
         self.defaults = defaults
         self.keepVisible = keepVisible
+        self.enabled = enabled
         handleView = EdgeHandleView(frame: .zero)
         handlePanel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         handlePanel.title = "行情提示条"
@@ -96,6 +98,27 @@ final class EdgeDockController {
     }
 
     func restore() { scheduleDock() }
+
+    func setEnabled(_ value: Bool) {
+        guard enabled != value else { return }
+        enabled = value
+        cancelTimer()
+        cancelAnimation()
+        if value { scheduleDock() }
+        else {
+            let reference = expanded ?? panel.frame
+            let frame = EdgeGeometry.clamp(reference, in: visibleFrame(for: reference))
+            edge = nil
+            expanded = nil
+            changeFrame(frame)
+            handlePanel.orderOut(nil)
+            if presentation != .manuallyHidden {
+                presentation = .shown
+                panel.orderFrontRegardless()
+            }
+            savePosition(frame)
+        }
+    }
 
     func userMovedWindow() {
         guard !changingFrame, !animating else { return }
@@ -134,10 +157,11 @@ final class EdgeDockController {
         presentation = .shown
         let visible = visibleFrame(for: expanded ?? panel.frame)
         var target = EdgeGeometry.clamp(expanded ?? panel.frame, in: visible)
-        if let edge {
-            target = EdgeGeometry.expandedFrame(target, at: edge, in: visible)
+        if enabled {
+            edge = .right
+            target = EdgeGeometry.expandedFrame(target, at: .right, in: visible)
             expanded = target
-            updateHandle(target, edge: edge, visible: visible)
+            updateHandle(target, edge: .right, visible: visible)
         }
         cancelAnimation()
         if wasCollapsed, let edge { changeFrame(EdgeGeometry.collapsedFrame(from: target, at: edge, strip: 0)) }
@@ -149,7 +173,7 @@ final class EdgeDockController {
                 guard let self else { return }
                 if !self.pointerInside() { self.scheduleCollapse() }
             }
-        }
+        } else if enabled, !pointerInside() { scheduleCollapse() }
         savePosition(target)
     }
 
@@ -164,11 +188,12 @@ final class EdgeDockController {
     func stop() { cancelTimer(); cancelAnimation(); handlePanel.orderOut(nil) }
 
     private func scheduleDock() {
+        guard enabled, presentation == .shown else { return }
         schedule(after: 0.2) { [weak self] in
-            guard let self, self.presentation == .shown else { return }
+            guard let self, self.enabled, self.presentation == .shown else { return }
             if NSEvent.pressedMouseButtons & 1 != 0 { self.scheduleDock(); return }
             let visible = self.visibleFrame(for: self.panel.frame)
-            guard let edge = EdgeGeometry.nearestEdge(to: self.panel.frame, in: visible) else { return }
+            let edge = DesktopEdge.right
             let target = EdgeGeometry.expandedFrame(self.panel.frame, at: edge, in: visible)
             self.edge = edge
             self.expanded = target
@@ -181,21 +206,21 @@ final class EdgeDockController {
 
     private func reveal() {
         cancelTimer()
-        guard presentation == .collapsed, !animating else { return }
+        guard enabled, presentation == .collapsed, !animating else { return }
         show()
     }
 
     private func scheduleCollapse() {
-        guard edge != nil, presentation == .shown else { return }
+        guard enabled, edge != nil, presentation == .shown else { return }
         schedule(after: 0.6) { [weak self] in
-            guard let self, self.presentation == .shown else { return }
+            guard let self, self.enabled, self.presentation == .shown else { return }
             if self.keepVisible() || NSEvent.pressedMouseButtons & 1 != 0 { self.scheduleCollapse(); return }
             if !self.pointerInside() { self.collapse() }
         }
     }
 
     private func collapse() {
-        guard let edge, let expanded, presentation == .shown, !animating else { return }
+        guard enabled, let edge, let expanded, presentation == .shown, !animating else { return }
         if keepVisible() { scheduleCollapse(); return }
         cancelTimer()
         presentation = .collapsed

@@ -20,6 +20,11 @@ struct WatchlistTests {
         }
         check(store.symbols.isEmpty, "首次启动必须为空")
         check(store.backgroundTransparency == 0.3, "首次启动背景透明度默认为30%")
+        check(store.autoHideEnabled, "首次启动默认开启右侧自动吸附隐藏")
+        store.autoHideEnabled = false
+        check(!QuoteStore(defaults: defaults, preview: nil).autoHideEnabled, "关闭自动隐藏后重启保持关闭")
+        store.autoHideEnabled = true
+        check(QuoteStore(defaults: defaults, preview: nil).autoHideEnabled, "重新开启自动隐藏后重启保持开启")
         try store.addSymbols("600108,002580")
         check(store.symbols.map(\.id) == ["sh600108", "sz002580"], "追加输入的股票")
         try store.addSymbols("002491")
