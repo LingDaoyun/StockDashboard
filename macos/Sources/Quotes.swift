@@ -43,6 +43,8 @@ struct Quote: Sendable {
     let amountYuan: Double
     let timestamp: Date
     let turnoverPercent: Double?
+    let volumeRatio: Double?
+    let amplitudePercent: Double?
 }
 
 enum QuoteParser {
@@ -79,9 +81,12 @@ enum QuoteParser {
                   timeText.utf8.count == 14, timeText.utf8.allSatisfy({ (48...57).contains($0) }),
                   let timestamp = formatter.date(from: timeText), formatter.string(from: timestamp) == timeText else { continue }
             let turnoverPercent = fields.count > 38 ? number(fields[38]).flatMap { $0 >= 0 ? $0 : nil } : nil
+            let volumeRatio = fields.count > 49 ? number(fields[49]).flatMap { $0 >= 0 ? $0 : nil } : nil
+            let amplitudePercent = fields.count > 43 ? number(fields[43]).flatMap { $0 >= 0 ? $0 : nil } : nil
             quotes[symbol.id] = Quote(symbol: symbol, name: name, price: price, previousClose: previousClose,
                                     change: change, changePercent: changePercent, volumeLots: volumeLots,
-                                    amountYuan: amountWan * 10_000, timestamp: timestamp, turnoverPercent: turnoverPercent)
+                                    amountYuan: amountWan * 10_000, timestamp: timestamp, turnoverPercent: turnoverPercent,
+                                    volumeRatio: volumeRatio, amplitudePercent: amplitudePercent)
         }
         guard !quotes.isEmpty else { throw QuoteError.noQuotes }
         return quotes

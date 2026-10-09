@@ -215,8 +215,18 @@ struct QuoteRow: View {
                         Button(action: remove) { Image(systemName: "xmark.circle") }
                             .help("删除这只股票")
                             .accessibilityLabel("删除\(symbol.code)")
+                        Text("量比 \(quote.flatMap(\.volumeRatio).map { String(format: "%.2f", $0) } ?? "—")")
+                            .font(.system(size: 10))
+                            .monospacedDigit()
+                            .help("腾讯行情源量比，单位为倍")
+                        Text("振幅 \(quote.flatMap(\.amplitudePercent).map { String(format: "%.2f%%", $0) } ?? "—")")
+                            .font(.system(size: 10))
+                            .monospacedDigit()
+                            .help("腾讯行情源日内振幅，单位为百分比")
                     }
                     .font(.system(size: 11))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                 }

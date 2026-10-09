@@ -38,7 +38,9 @@ enum QuoteTests {
                 for symbol in symbols {
                     let quote = quotes[symbol.id]!
                     try expect(quote.turnoverPercent.map { $0.isFinite && $0 >= 0 } == true, "实时行情应返回有效换手率：\(symbol.id)")
-                    print("LIVE: \(symbol.id) \(quote.name) price=\(quote.price) volumeLots=\(quote.volumeLots) amountYuan=\(quote.amountYuan) timestamp=\(quote.timestamp) turnoverPercent=\(quote.turnoverPercent.map { String($0) } ?? "—")")
+                    try expect(quote.volumeRatio.map { $0.isFinite && $0 >= 0 } == true, "实时行情应返回有效量比：\(symbol.id)")
+                    try expect(quote.amplitudePercent.map { $0.isFinite && $0 >= 0 } == true, "实时行情应返回有效振幅：\(symbol.id)")
+                    print("LIVE: \(symbol.id) \(quote.name) price=\(quote.price) volumeLots=\(quote.volumeLots) amountYuan=\(quote.amountYuan) timestamp=\(quote.timestamp) turnoverPercent=\(quote.turnoverPercent.map { String($0) } ?? "—") volumeRatio=\(quote.volumeRatio.map { String($0) } ?? "—") amplitudePercent=\(quote.amplitudePercent.map { String($0) } ?? "—")")
                 }
             }
             print("PASS: \(checks) assertions")
@@ -60,6 +62,8 @@ enum QuoteTests {
         fields[36] = "34719"
         fields[37] = "440377"
         fields[38] = "0.28"
+        fields[43] = "2.12"
+        fields[49] = "1.18"
         fields[57] = "440376.8903"
         for (index, value) in edits { fields[index] = value }
         return "v_\(symbol.id)=\"\(fields.prefix(count).joined(separator: "~"))\";\n"
@@ -92,9 +96,27 @@ enum QuoteTests {
         try expect(abs((quote?.amountYuan ?? 0) - 4_403_768_903) < 0.001, "精确成交额万元应转换成元")
         try expect(quote?.timestamp.timeIntervalSince1970 == 1_791_529_013, "十四位时间应按中国时区解析")
         try expect(quote?.turnoverPercent == 0.28, "38号换手率字段已经是百分数，不应再乘100")
+        try expect(quote?.volumeRatio == 1.18, "49号量比字段应保留倍数原值，不应乘100")
+        try expect(quote?.amplitudePercent == 2.12, "43号振幅字段已经是百分数，不应再乘100")
         let simple = try QuoteParser.parse(encoded(fixture(symbol, count: 38)), symbols: [symbol])
         try expect(simple[symbol.id]?.amountYuan == 4_403_770_000, "只包含基础字段时应按37号万元字段转换")
         try expect(simple[symbol.id]?.turnoverPercent == nil, "缺少38号换手率字段时应保留行情，换手率为空")
+        try expect(simple[symbol.id]?.volumeRatio == nil, "缺少49号量比字段时应保留行情，量比为空")
+        try expect(simple[symbol.id]?.amplitudePercent == nil, "缺少43号振幅字段时应保留行情，振幅为空")
+        for index in [43, 49] {
+            for value in ["", "bad", "nan", "inf", "-0.01"] {
+                let optionalMetrics = try QuoteParser.parse(encoded(fixture(symbol, edits: [index: value])), symbols: [symbol])[symbol.id]
+                let otherMetric = index == 49 ? optionalMetrics?.amplitudePercent : optionalMetrics?.volumeRatio
+                let invalidMetric = index == 49 ? optionalMetrics?.volumeRatio : optionalMetrics?.amplitudePercent
+                try expect(optionalMetrics?.price == 1263.12 && otherMetric == (index == 49 ? 2.12 : 1.18), "\(index)号字段非法时应保留报价和另一观察参数：\(value)")
+                try expect(invalidMetric == nil, "\(index)号字段缺失或非法时应为空：\(value)")
+            }
+            for value in ["0", "101.23"] {
+                let validMetrics = try QuoteParser.parse(encoded(fixture(symbol, edits: [index: value])), symbols: [symbol])[symbol.id]
+                let metric = index == 49 ? validMetrics?.volumeRatio : validMetrics?.amplitudePercent
+                try expect(metric == Double(value), "\(index)号参数应允许零和非负有限数值：\(value)")
+            }
+        }
         for value in ["", "bad", "nan", "inf", "-0.01"] {
             let optionalTurnover = try QuoteParser.parse(encoded(fixture(symbol, edits: [38: value])), symbols: [symbol])
             try expect(optionalTurnover[symbol.id]?.price == 1263.12, "换手率非法时仍应保留原报价：\(value)")
