@@ -657,6 +657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         menu.addItem(.separator())
         addItem("添加股票…", action: #selector(addStock), to: menu)
         addItem("背景透明度", action: #selector(toggleTransparency), to: menu)
+        addItem("启用提醒通知", action: #selector(prepareNotifications), to: menu)
         addItem("立即刷新", action: #selector(refresh), to: menu)
         pinItem = addItem("浮窗置顶", action: #selector(togglePin), to: menu)
         pinItem.state = store.isPinned ? .on : .off
@@ -669,6 +670,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         let menu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
+        addItem("启用提醒通知", action: #selector(prepareNotifications), to: appMenu)
         addItem("退出A股桌面行情", action: #selector(quit), key: "q", to: appMenu)
         appItem.submenu = appMenu
         menu.addItem(appItem)
@@ -830,7 +832,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         store.expandedSymbolID = store.expandedSymbolID == symbol.id ? nil : symbol.id
     }
 
-    private func prepareNotifications() {
+    @objc private func prepareNotifications() {
         Task { @MainActor [weak self] in
             guard let self, let notificationCenter = self.notificationCenter else { return }
             let settings = await notificationCenter.notificationSettings()
