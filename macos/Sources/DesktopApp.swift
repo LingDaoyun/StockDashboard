@@ -599,6 +599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     private var workspaceObservers: [NSObjectProtocol] = []
     private var previewDomain: String?
     private var notificationCenter: UNUserNotificationCenter?
+    private var edgeDock: EdgeDockController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = CommandLine.arguments
@@ -645,6 +646,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         })
         store.start()
         panel.orderFrontRegardless()
+        edgeDock?.restore()
     }
 
     private func createMenu() {
@@ -704,14 +706,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         panel.isMovableByWindowBackground = true
         panel.backgroundColor = .clear
         panel.isOpaque = false
+        panel.ignoresMouseEvents = false
         panel.hasShadow = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.level = store.isPinned ? .floating : .normal
-        let surface = NSView()
+        let surface = DesktopHoverView()
         surface.wantsLayer = true
         surface.layer?.cornerRadius = 16
         surface.layer?.masksToBounds = true
-        surface.layer?.backgroundColor = NSColor.clear.cgColor
+        // WindowServer skips fully transparent pixels for mouse hit testing.
+        // Keep this subtle rounded hit surface independent of the glass opacity.
+        surface.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.01).cgColor
         let glass = NSVisualEffectView()
         glass.material = .hudWindow
         glass.blendingMode = .behindWindow
@@ -750,18 +755,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
                                          y: frame.maxY - panel.frame.height - 24))
         }
         panel.delegate = self
+        edgeDock = EdgeDockController(panel: panel, surface: surface, defaults: store.defaults) { [weak self] in
+            guard let store = self?.store else { return false }
+            return store.isAddingStock || store.isAdjustingTransparency || store.expandedSymbolID != nil
+        }
     }
 
     private func resizePanel() {
         guard panel != nil else { return }
         let rowsHeight = store.listHeight
-        var frame = panel.frame
-        let top = frame.maxY
-        frame.size = NSSize(width: 370, height: 81 + rowsHeight)
-        frame.origin.y = top - frame.height
-        panel.setFrame(frame, display: true)
+        let size = NSSize(width: 370, height: 81 + rowsHeight)
+        if let edgeDock { edgeDock.resize(to: size) }
+        else {
+            var frame = panel.frame
+            let top = frame.maxY
+            frame.size = size
+            frame.origin.y = top - frame.height
+            panel.setFrame(frame, display: true)
+            keepOnScreen()
+        }
         updateWindowMask()
-        keepOnScreen()
     }
 
     private func applyTransparency(_ value: Double) {
@@ -793,16 +806,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
 
     func windowDidMove(_ notification: Notification) {
         guard notification.object as? NSWindow === panel else { return }
-        store.defaults.set(panel.frame.origin.x, forKey: "positionX")
-        store.defaults.set(panel.frame.origin.y, forKey: "positionY")
+        edgeDock?.userMovedWindow()
     }
 
-    @objc private func showPanel() { keepOnScreen(); panel.orderFrontRegardless() }
-    @objc private func hidePanel() { panel.orderOut(nil) }
+    @objc private func showPanel() { edgeDock?.show() }
+    @objc private func hidePanel() { edgeDock?.hide() }
     @objc private func refresh() { store.refresh() }
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func addStock() {
+        edgeDock?.show()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         store.isAdjustingTransparency = false
@@ -814,10 +827,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         store.isPinned.toggle()
         panel.level = store.isPinned ? .floating : .normal
         pinItem.state = store.isPinned ? .on : .off
-        panel.orderFrontRegardless()
+        edgeDock?.show()
     }
 
     @objc private func toggleTransparency() {
+        edgeDock?.show()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         store.isAddingStock = false
@@ -825,6 +839,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     }
 
     private func toggleTracking(_ symbol: StockSymbol) {
+        edgeDock?.show()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         store.isAddingStock = false
@@ -880,6 +895,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        edgeDock?.stop()
         store.stop()
         for observer in workspaceObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         if let previewDomain { store.defaults.removePersistentDomain(forName: previewDomain) }

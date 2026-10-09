@@ -10,9 +10,13 @@ xcrun swiftc -O -swift-version 5 -target arm64-apple-macosx13.0 \
   "$project_dir/Sources/Quotes.swift" \
   "$project_dir/Sources/Tracking.swift" \
   "$project_dir/Sources/TrackingViews.swift" \
+  "$project_dir/Sources/EdgeGeometry.swift" \
+  "$project_dir/Sources/EdgeDocking.swift" \
   "$project_dir/Sources/DesktopApp.swift" \
   "$project_dir/Sources/main.swift" \
   -o "$app_dir/Contents/MacOS/AShareDesktop"
+
+cp "$project_dir/Assets/AppIcon.icns" "$app_dir/Contents/Resources/AppIcon.icns"
 
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -23,8 +27,9 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>A股桌面行情</string>
   <key>CFBundleDisplayName</key><string>A股桌面行情</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.6.1</string>
-  <key>CFBundleVersion</key><string>9</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleShortVersionString</key><string>1.7.0</string>
+  <key>CFBundleVersion</key><string>10</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

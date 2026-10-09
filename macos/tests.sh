@@ -7,5 +7,7 @@ xcrun swiftc -swift-version 6 Sources/Quotes.swift Tests/QuoteTests.swift -o "$t
 "$test_dir/quote-tests" "$@"
 xcrun swiftc -swift-version 6 Sources/Quotes.swift Sources/Tracking.swift Tests/TrackingTests.swift -o "$test_dir/tracking-tests"
 "$test_dir/tracking-tests"
-xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 Sources/Quotes.swift Sources/Tracking.swift Sources/TrackingViews.swift Sources/DesktopApp.swift Tests/WatchlistTests.swift -o "$test_dir/watchlist-tests"
+xcrun swiftc -swift-version 6 Sources/EdgeGeometry.swift Tests/EdgeGeometryTests.swift -o "$test_dir/edge-geometry-tests"
+"$test_dir/edge-geometry-tests"
+xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 Sources/Quotes.swift Sources/Tracking.swift Sources/TrackingViews.swift Sources/EdgeGeometry.swift Sources/EdgeDocking.swift Sources/DesktopApp.swift Tests/WatchlistTests.swift -o "$test_dir/watchlist-tests"
 "$test_dir/watchlist-tests"
