@@ -1,8 +1,10 @@
 import AppKit
 import SwiftUI
 import Combine
+import UserNotifications
 
 private let quoteRowHeight: CGFloat = 78
+private let trackingEditorHeight: CGFloat = 160
 
 @MainActor
 final class QuoteStore: ObservableObject {
@@ -14,6 +16,12 @@ final class QuoteStore: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published var isAddingStock = false
     @Published var isAdjustingTransparency = false
+    @Published var expandedSymbolID: String?
+    @Published private(set) var tracking: [String: StockTracking] = [:]
+    @Published private(set) var priceAlerts: [String: String] = [:]
+    @Published var notificationNotice: String?
+    var onPriceAlert: ((PriceAlert) -> Void)?
+    var onAlertSetup: (() -> Void)?
     @Published var backgroundTransparency: Double {
         didSet { defaults.set(backgroundTransparency, forKey: "backgroundTransparency") }
     }
@@ -36,9 +44,72 @@ final class QuoteStore: ObservableObject {
         self.symbols = (try? StockSymbol.parseList(saved)) ?? []
         self.isPinned = defaults.object(forKey: "pinned") as? Bool ?? false
         self.backgroundTransparency = min(1, max(0, defaults.object(forKey: "backgroundTransparency") as? Double ?? 0.3))
+        if let data = defaults.data(forKey: "stockTracking"),
+           let savedTracking = try? JSONDecoder().decode([String: StockTracking].self, from: data) {
+            let ids = Set(symbols.map(\.id))
+            tracking = savedTracking.filter { ids.contains($0.key) }
+        }
     }
 
     var codeText: String { symbols.map(\.id).joined(separator: ", ") }
+
+    var listHeight: CGFloat {
+        if symbols.isEmpty { return 198 }
+        return min(symbols.reduce(CGFloat(max(0, symbols.count - 1))) { total, symbol in
+            let configuration = tracking[symbol.id]
+            return total + quoteRowHeight
+                + (configuration?.hasPosition == true ? 18 : 0)
+                + (configuration?.hasAlerts == true ? 18 : 0)
+                + (expandedSymbolID == symbol.id ? trackingEditorHeight : 0)
+        }, 570)
+    }
+
+    func saveTracking(for symbol: StockSymbol, cost: String, quantity: String, upper: String, lower: String, now: Date = Date()) throws {
+        guard symbols.contains(symbol) else {
+            throw NSError(domain: "StockTracking", code: 1, userInfo: [NSLocalizedDescriptionKey: "股票已移除，请重新添加。"])
+        }
+        var value = try StockTracking.parse(cost: cost, quantity: quantity, upper: upper, lower: lower)
+        let previous = tracking[symbol.id]
+        value.upperTriggered = value.upperPrice == previous?.upperPrice ? previous?.upperTriggered ?? false : false
+        value.lowerTriggered = value.lowerPrice == previous?.lowerPrice ? previous?.lowerTriggered ?? false : false
+        let changedPrices = value.upperPrice != previous?.upperPrice || value.lowerPrice != previous?.lowerPrice
+        value.armedAt = value.hasAlerts ? (changedPrices ? now : previous?.armedAt ?? now) : nil
+        tracking[symbol.id] = value.hasPosition || value.hasAlerts ? value : nil
+        if changedPrices { priceAlerts[symbol.id] = nil }
+        persistTracking()
+        if value.hasAlerts { onAlertSetup?() }
+    }
+
+    func rearmAlerts(for symbol: StockSymbol, now: Date = Date()) {
+        guard var value = tracking[symbol.id], value.hasAlerts else { return }
+        value.upperTriggered = false
+        value.lowerTriggered = false
+        value.armedAt = now
+        tracking[symbol.id] = value
+        priceAlerts[symbol.id] = nil
+        persistTracking()
+        onAlertSetup?()
+    }
+
+    func evaluateAlerts(_ incoming: [String: Quote], now: Date) {
+        var changed = false
+        for symbol in symbols {
+            guard let quote = incoming[symbol.id], var value = tracking[symbol.id] else { continue }
+            let alerts = value.takeAlerts(for: quote, now: now)
+            guard !alerts.isEmpty else { continue }
+            tracking[symbol.id] = value
+            changed = true
+            for alert in alerts {
+                priceAlerts[symbol.id] = alert.message
+                onPriceAlert?(alert)
+            }
+        }
+        if changed { persistTracking() }
+    }
+
+    private func persistTracking() {
+        if let data = try? JSONEncoder().encode(tracking) { defaults.set(data, forKey: "stockTracking") }
+    }
 
     func start() {
         let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
@@ -75,6 +146,10 @@ final class QuoteStore: ObservableObject {
         defaults.set(codeText, forKey: "symbols")
         let ids = Set(values.map(\.id))
         quotes = quotes.filter { ids.contains($0.key) }
+        tracking = tracking.filter { ids.contains($0.key) }
+        priceAlerts = priceAlerts.filter { ids.contains($0.key) }
+        if let expandedSymbolID, !ids.contains(expandedSymbolID) { self.expandedSymbolID = nil }
+        persistTracking()
         unavailable = []
         lastReceipt = nil
         errorMessage = nil
@@ -138,6 +213,7 @@ final class QuoteStore: ObservableObject {
                 unavailable.formUnion(requestedIDs.subtracting(incoming.keys))
                 lastReceipt = Date()
                 errorMessage = nil
+                evaluateAlerts(incoming, now: lastReceipt!)
                 if isPreview {
                     let values = requested.compactMap { symbol -> String? in
                         guard let q = incoming[symbol.id] else { return nil }
@@ -189,7 +265,22 @@ struct QuoteRow: View {
     let quote: Quote?
     let failed: Bool
     let unavailable: Bool
+    let configuration: StockTracking
+    let isExpanded: Bool
+    let alertMessage: String?
+    let notificationNotice: String?
+    let configure: () -> Void
+    let save: (String, String, String, String) throws -> Void
+    let rearm: () -> Void
     let remove: () -> Void
+
+    private var profit: PositionProfit? { quote.flatMap { configuration.profit(at: $0.price) } }
+
+    private var profitColor: Color {
+        guard let profit else { return .secondary }
+        return profit.amount > 0 ? Color(red: 0.85, green: 0.19, blue: 0.24)
+            : profit.amount < 0 ? Color(red: 0.06, green: 0.59, blue: 0.38) : .primary
+    }
 
     private var movement: Color {
         guard let quote else { return .secondary }
@@ -201,9 +292,17 @@ struct QuoteRow: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
                 HStack(spacing: 5) {
-                    Text(quote?.name ?? symbol.code)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
+                    Button(action: configure) {
+                        HStack(spacing: 3) {
+                            Text(quote?.name ?? symbol.code)
+                                .font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 7, weight: .semibold)).foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("点击名称展开或收起持仓与价格提醒")
+                    .accessibilityLabel("\(isExpanded ? "收起" : "设置")\(symbol.code)持仓和提醒")
                     if failed || unavailable {
                         Text(quote == nil ? "无行情" : "上次数据")
                             .font(.system(size: 9)).foregroundStyle(.orange)
@@ -247,9 +346,46 @@ struct QuoteRow: View {
             .font(.system(size: 10))
             .lineLimit(1)
             .foregroundStyle(.secondary)
+            if configuration.hasPosition {
+                HStack(spacing: 10) {
+                    metric("成本", value: configuration.costPrice.map { String(format: "%.3f", $0) } ?? "—")
+                        .help("\(configuration.quantity ?? 0)股；成本由你手动填写")
+                    metric("浮盈亏", value: profit.map { String(format: "%+.2f", $0.amount) } ?? "—")
+                        .foregroundStyle(profitColor)
+                    metric("盈亏率", value: profit.map { String(format: "%+.2f%%", $0.percent) } ?? "—")
+                        .foregroundStyle(profitColor)
+                }
+                .font(.system(size: 10)).lineLimit(1).foregroundStyle(.secondary)
+                .help("按最新可用报价与填写的成本、股数估算浮盈亏；不额外扣除费用")
+            }
+            if configuration.hasAlerts {
+                HStack(spacing: 6) {
+                    Image(systemName: configuration.hasTriggeredAlerts ? "bell.fill" : "bell")
+                    if let upper = configuration.upperPrice {
+                        Text("≥\(String(format: "%.2f", upper)) \(configuration.upperTriggered ? "已提醒" : "待触达")")
+                    }
+                    if let lower = configuration.lowerPrice {
+                        Text("≤\(String(format: "%.2f", lower)) \(configuration.lowerTriggered ? "已提醒" : "待触达")")
+                    }
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 10)).lineLimit(1)
+                .foregroundStyle(configuration.hasTriggeredAlerts ? Color.orange : Color.secondary)
+                .help(alertMessage ?? "只有设置后产生的30秒内报价可以触发；每个条件只提醒一次")
+            }
+            if isExpanded {
+                VStack(spacing: 5) {
+                    Divider().opacity(0.6)
+                    TrackingEditor(symbol: symbol, configuration: configuration,
+                                   notificationNotice: notificationNotice, save: save, rearm: rearm)
+                        .frame(height: 154, alignment: .top)
+                }
+            }
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 16)
+        .frame(height: quoteRowHeight + (configuration.hasPosition ? 18 : 0)
+               + (configuration.hasAlerts ? 18 : 0) + (isExpanded ? trackingEditorHeight : 0))
     }
 
     private func metric(_ title: String, value: String) -> some View {
@@ -270,6 +406,7 @@ struct WidgetView: View {
     let add: () -> Void
     let pin: () -> Void
     let hide: () -> Void
+    let configure: (StockSymbol) -> Void
     @State private var newCode = ""
     @State private var additionError: String?
     @FocusState private var codeFocused: Bool
@@ -367,12 +504,22 @@ struct WidgetView: View {
                             QuoteRow(symbol: symbol, quote: store.quotes[symbol.id],
                                      failed: store.errorMessage != nil,
                                      unavailable: store.unavailable.contains(symbol.id),
+                                     configuration: store.tracking[symbol.id] ?? StockTracking(),
+                                     isExpanded: store.expandedSymbolID == symbol.id,
+                                     alertMessage: store.priceAlerts[symbol.id],
+                                     notificationNotice: store.notificationNotice,
+                                     configure: { configure(symbol) },
+                                     save: { cost, quantity, upper, lower in
+                                         try store.saveTracking(for: symbol, cost: cost, quantity: quantity, upper: upper, lower: lower)
+                                         store.expandedSymbolID = nil
+                                     },
+                                     rearm: { store.rearmAlerts(for: symbol) },
                                      remove: { store.removeSymbol(symbol) })
                             if symbol != store.symbols.last { Divider().padding(.horizontal, 16).opacity(0.6) }
                         }
                     }
                 }
-                .frame(height: min(CGFloat(store.symbols.count) * quoteRowHeight, 570))
+                .frame(height: store.listHeight)
             }
             Divider().opacity(0.6)
             HStack(spacing: 6) {
@@ -401,6 +548,7 @@ struct WidgetView: View {
         .onExitCommand {
             store.isAddingStock = false
             store.isAdjustingTransparency = false
+            store.expandedSymbolID = nil
         }
         .onChange(of: store.isAddingStock) { adding in
             if !adding { codeFocused = false; newCode = ""; additionError = nil }
@@ -441,7 +589,7 @@ final class TransparentHostingView<Content: View>: NSHostingView<Content> {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     private var store: QuoteStore!
     private var panel: DesktopPanel!
     private var glassView: NSVisualEffectView?
@@ -450,6 +598,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var subscriptions: [AnyCancellable] = []
     private var workspaceObservers: [NSObjectProtocol] = []
     private var previewDomain: String?
+    private var notificationCenter: UNUserNotificationCenter?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = CommandLine.arguments
@@ -463,6 +612,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defaults = UserDefaults(suiteName: domain)!
         } else { defaults = .standard }
         store = QuoteStore(defaults: defaults, preview: preview)
+        if !store.isPreview {
+            notificationCenter = UNUserNotificationCenter.current()
+            notificationCenter?.delegate = self
+        }
+        store.onPriceAlert = { [weak self] alert in self?.postPriceAlert(alert) }
+        store.onAlertSetup = { [weak self] in self?.prepareNotifications() }
         createApplicationMenu()
         createMenu()
         createPanel()
@@ -472,6 +627,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         subscriptions.append(store.$backgroundTransparency.sink { [weak self] value in
             self?.applyTransparency(value)
         })
+        subscriptions.append(store.$tracking.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.resizePanel() }
+        })
+        subscriptions.append(store.$expandedSymbolID.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.resizePanel() }
+        })
+        if store.tracking.values.contains(where: \.hasAlerts) { prepareNotifications() }
         let center = NSWorkspace.shared.notificationCenter
         workspaceObservers.append(center.addObserver(forName: NSWorkspace.willSleepNotification,
                                                       object: nil, queue: .main) { [weak self] _ in
@@ -559,7 +721,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                                                transparency: { [weak self] in self?.toggleTransparency() },
                                                                add: { [weak self] in self?.addStock() },
                                                                pin: { [weak self] in self?.togglePin() },
-                                                               hide: { [weak self] in self?.hidePanel() }))
+                                                               hide: { [weak self] in self?.hidePanel() },
+                                                               configure: { [weak self] symbol in self?.toggleTracking(symbol) }))
         host.translatesAutoresizingMaskIntoConstraints = false
         surface.addSubview(host)
         NSLayoutConstraint.activate([
@@ -589,7 +752,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func resizePanel() {
         guard panel != nil else { return }
-        let rowsHeight = store.symbols.isEmpty ? 198 : min(CGFloat(store.symbols.count) * quoteRowHeight, 570)
+        let rowsHeight = store.listHeight
         var frame = panel.frame
         let top = frame.maxY
         frame.size = NSSize(width: 370, height: 81 + rowsHeight)
@@ -641,6 +804,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         store.isAdjustingTransparency = false
+        store.expandedSymbolID = nil
         store.isAddingStock = true
     }
 
@@ -656,6 +820,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
         store.isAddingStock = false
         store.isAdjustingTransparency.toggle()
+    }
+
+    private func toggleTracking(_ symbol: StockSymbol) {
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        store.isAddingStock = false
+        store.isAdjustingTransparency = false
+        store.expandedSymbolID = store.expandedSymbolID == symbol.id ? nil : symbol.id
+    }
+
+    private func prepareNotifications() {
+        Task { @MainActor [weak self] in
+            guard let self, let notificationCenter = self.notificationCenter else { return }
+            let settings = await notificationCenter.notificationSettings()
+            if settings.authorizationStatus == .notDetermined {
+                do {
+                    let granted = try await notificationCenter.requestAuthorization(options: [.alert, .sound])
+                    store.notificationNotice = granted ? nil
+                            : "系统通知未开启；触达时仍会在浮窗标记并响铃。"
+                } catch {
+                    store.notificationNotice = "系统通知暂不可用；触达时仍会在浮窗标记并响铃。"
+                }
+            } else {
+                store.notificationNotice = settings.authorizationStatus == .denied
+                    ? "系统通知未开启；触达时仍会在浮窗标记并响铃。" : nil
+            }
+        }
+    }
+
+    private func postPriceAlert(_ alert: PriceAlert) {
+        guard let notificationCenter else { return }
+        NSSound.beep()
+        let content = UNMutableNotificationContent()
+        content.title = "\(alert.name) · \(alert.direction.title)"
+        content.subtitle = "\(alert.symbolID.uppercased()) · \(DisplayFormat.chinaTime.string(from: alert.timestamp))"
+        content.body = alert.message
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        notificationCenter.add(request) { [weak self] error in
+            if error != nil {
+                Task { @MainActor in
+                    self?.store.notificationNotice = "系统通知发送失败；浮窗触达标记和响铃仍有效。"
+                }
+            }
+        }
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                          willPresent notification: UNNotification,
+                                          withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list])
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
