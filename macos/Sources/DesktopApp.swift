@@ -197,55 +197,51 @@ struct QuoteRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 5) {
-                        Text(quote?.name ?? symbol.code)
-                            .font(.system(size: 13, weight: .semibold))
-                            .lineLimit(1)
-                        if failed || unavailable {
-                            Text(quote == nil ? "无行情" : "上次数据")
-                                .font(.system(size: 9)).foregroundStyle(.orange)
-                        }
+                HStack(spacing: 5) {
+                    Text(quote?.name ?? symbol.code)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    if failed || unavailable {
+                        Text(quote == nil ? "无行情" : "上次数据")
+                            .font(.system(size: 9)).foregroundStyle(.orange)
                     }
-                    HStack(spacing: 8) {
-                        Text(symbol.id.uppercased())
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        Button(action: remove) { Image(systemName: "xmark.circle") }
-                            .help("删除这只股票")
-                            .accessibilityLabel("删除\(symbol.code)")
-                        Text("量比 \(quote.flatMap(\.volumeRatio).map { String(format: "%.2f", $0) } ?? "—")")
-                            .font(.system(size: 10))
-                            .monospacedDigit()
-                            .help("腾讯行情源量比，单位为倍")
-                        Text("振幅 \(quote.flatMap(\.amplitudePercent).map { String(format: "%.2f%%", $0) } ?? "—")")
-                            .font(.system(size: 10))
-                            .monospacedDigit()
-                            .help("腾讯行情源日内振幅，单位为百分比")
-                    }
-                    .font(.system(size: 11))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
-                VStack(alignment: .trailing, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Text(quote.map { String(format: "%.2f", $0.price) } ?? "—")
                         .font(.system(size: 21, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                     Text(quote.map { String(format: "%+.2f  %+.2f%%", $0.change, $0.changePercent) } ?? "等待行情")
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .lineLimit(1)
                 }
                 .foregroundStyle(movement)
             }
-            HStack(spacing: 8) {
-                Text("成交量 \(quote.map { DisplayFormat.magnitude($0.volumeLots, unit: "手") } ?? "—")")
-                Spacer(minLength: 0)
-                Text("换手率 \(quote.flatMap(\.turnoverPercent).map { String(format: "%.2f%%", $0) } ?? "—")")
-                Spacer(minLength: 0)
-                Text("成交额 \(quote.map { DisplayFormat.magnitude($0.amountYuan, unit: "元") } ?? "—")")
+            VStack(spacing: 4) {
+                HStack(spacing: 10) {
+                    HStack(spacing: 8) {
+                        Text(symbol.id.uppercased())
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        Button(action: remove) { Image(systemName: "xmark.circle") }
+                            .font(.system(size: 11))
+                            .buttonStyle(.plain)
+                            .help("删除这只股票")
+                            .accessibilityLabel("删除\(symbol.code)")
+                        Spacer(minLength: 0)
+                    }
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    metric("量比", value: quote.flatMap(\.volumeRatio).map { String(format: "%.2f", $0) } ?? "—")
+                        .help("腾讯行情源量比，单位为倍")
+                    metric("振幅", value: quote.flatMap(\.amplitudePercent).map { String(format: "%.2f%%", $0) } ?? "—")
+                        .help("腾讯行情源日内振幅，单位为百分比")
+                }
+                HStack(spacing: 10) {
+                    metric("成交量", value: quote.map { DisplayFormat.magnitude($0.volumeLots, unit: "手") } ?? "—")
+                    metric("换手率", value: quote.flatMap(\.turnoverPercent).map { String(format: "%.2f%%", $0) } ?? "—")
+                    metric("成交额", value: quote.map { DisplayFormat.magnitude($0.amountYuan, unit: "元") } ?? "—")
+                }
             }
             .font(.system(size: 10))
             .lineLimit(1)
@@ -253,6 +249,17 @@ struct QuoteRow: View {
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 16)
+    }
+
+    private func metric(_ title: String, value: String) -> some View {
+        HStack(spacing: 2) {
+            Text(title).frame(width: 30, alignment: .leading)
+            Text(value)
+                .monospacedDigit()
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .frame(minWidth: 0, maxWidth: .infinity)
     }
 }
 
