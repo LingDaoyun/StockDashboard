@@ -80,6 +80,7 @@ enum QuoteParser {
                   (amountWan * 10_000).isFinite,
                   timeText.utf8.count == 14, timeText.utf8.allSatisfy({ (48...57).contains($0) }),
                   let timestamp = formatter.date(from: timeText), formatter.string(from: timestamp) == timeText else { continue }
+            if let previous = quotes[symbol.id], previous.timestamp > timestamp { continue }
             let turnoverPercent = fields.count > 38 ? number(fields[38]).flatMap { $0 >= 0 ? $0 : nil } : nil
             let volumeRatio = fields.count > 49 ? number(fields[49]).flatMap { $0 >= 0 ? $0 : nil } : nil
             let amplitudePercent = fields.count > 43 ? number(fields[43]).flatMap { $0 >= 0 ? $0 : nil } : nil

@@ -53,6 +53,17 @@ struct StockTracking: Codable, Equatable {
                              upperPrice: upperPrice, lowerPrice: lowerPrice)
     }
 
+    func validated() throws -> StockTracking {
+        var value = try Self.parse(cost: costPrice.map { String($0) } ?? "",
+                                   quantity: quantity.map(String.init) ?? "",
+                                   upper: upperPrice.map { String($0) } ?? "",
+                                   lower: lowerPrice.map { String($0) } ?? "")
+        value.upperTriggered = value.upperPrice != nil && upperTriggered
+        value.lowerTriggered = value.lowerPrice != nil && lowerTriggered
+        value.armedAt = value.hasAlerts ? armedAt : nil
+        return value
+    }
+
     func profit(at price: Double) -> PositionProfit? {
         guard let costPrice, let quantity, costPrice.isFinite, costPrice > 0,
               quantity > 0, price.isFinite, price > 0 else { return nil }

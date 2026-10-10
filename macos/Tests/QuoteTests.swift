@@ -98,6 +98,12 @@ enum QuoteTests {
         try expect(quote?.turnoverPercent == 0.28, "38号换手率字段已经是百分数，不应再乘100")
         try expect(quote?.volumeRatio == 1.18, "49号量比字段应保留倍数原值，不应乘100")
         try expect(quote?.amplitudePercent == 2.12, "43号振幅字段已经是百分数，不应再乘100")
+        let newer = fixture(symbol, edits: [3: "1264", 30: "20261009145656"])
+        let older = fixture(symbol, edits: [3: "1262", 30: "20261009145650"])
+        for lines in [newer + older, older + newer] {
+            let duplicates = try QuoteParser.parse(encoded(lines), symbols: [symbol])
+            try expect(duplicates[symbol.id]?.price == 1264, "重复记录必须保留源时间较新的报价，与行顺序无关")
+        }
         let simple = try QuoteParser.parse(encoded(fixture(symbol, count: 38)), symbols: [symbol])
         try expect(simple[symbol.id]?.amountYuan == 4_403_770_000, "只包含基础字段时应按37号万元字段转换")
         try expect(simple[symbol.id]?.turnoverPercent == nil, "缺少38号换手率字段时应保留行情，换手率为空")

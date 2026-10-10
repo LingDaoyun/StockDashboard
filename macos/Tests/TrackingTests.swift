@@ -113,6 +113,43 @@ enum TrackingTests {
         var restored = try JSONDecoder().decode(StockTracking.self, from: data)
         check(restored == armed && restored.armedAt == now, "持久化保留配置、设定时间和触发状态")
         check(restored.takeAlerts(for: quote(price: 14, at: now), now: now).isEmpty, "重载配置后不重复响铃")
+
+        let invertedData = Data(#"{"upperPrice":9,"lowerPrice":11,"upperTriggered":false,"lowerTriggered":false}"#.utf8)
+        let inverted = try JSONDecoder().decode(StockTracking.self, from: invertedData)
+        rejects("解码后的逆序阈值不能恢复为有效提醒") { _ = try inverted.validated() }
+        rejects("恢复配置必须同时有成本和数量") { _ = try StockTracking(costPrice: 10).validated() }
+        rejects("恢复配置必须同时有数量和成本") { _ = try StockTracking(quantity: 100).validated() }
+        for quantity in [0, -1] {
+            rejects("恢复配置不能接受非正数量") { _ = try StockTracking(costPrice: 10, quantity: quantity).validated() }
+        }
+        rejects("恢复配置不能接受总成本溢出") { _ = try StockTracking(costPrice: 1e308, quantity: 100).validated() }
+        for price in [Double.nan, .infinity, -.infinity, 0, -1] {
+            rejects("恢复配置不能接受非法成本") { _ = try StockTracking(costPrice: price, quantity: 100).validated() }
+            rejects("恢复配置不能接受非法上方提醒价") { _ = try StockTracking(upperPrice: price).validated() }
+            rejects("恢复配置不能接受非法下方提醒价") { _ = try StockTracking(lowerPrice: price).validated() }
+        }
+        rejects("恢复配置不能接受相等阈值") { _ = try StockTracking(upperPrice: 10, lowerPrice: 10).validated() }
+        let valid = StockTracking(costPrice: 10.5, quantity: 200, upperPrice: 12, lowerPrice: 8,
+                                  upperTriggered: true, lowerTriggered: true, armedAt: now)
+        let validated = try valid.validated()
+        check(validated == valid, "恢复验证保留合法持仓、提醒价、触发状态和设定时间")
+        var validatedRestored = try restored.validated()
+        check(validatedRestored == restored, "验证解码配置不重置已触达状态")
+        check(validatedRestored.takeAlerts(for: quote(price: 14, at: now), now: now).isEmpty, "恢复验证后仍不重复提醒")
+        let upperWithOrphan = try StockTracking(upperPrice: 12, upperTriggered: true,
+                                               lowerTriggered: true, armedAt: now).validated()
+        check(upperWithOrphan.upperTriggered && !upperWithOrphan.lowerTriggered && upperWithOrphan.armedAt == now,
+              "只有上方提醒时清理下方孤立标记，保留上方状态和时间")
+        let lowerWithOrphan = try StockTracking(lowerPrice: 8, upperTriggered: true,
+                                               lowerTriggered: true, armedAt: now).validated()
+        check(!lowerWithOrphan.upperTriggered && lowerWithOrphan.lowerTriggered && lowerWithOrphan.armedAt == now,
+              "只有下方提醒时清理上方孤立标记，保留下方状态和时间")
+        let positionWithOrphans = try StockTracking(costPrice: 10, quantity: 100, upperTriggered: true,
+                                                   lowerTriggered: true, armedAt: now).validated()
+        check(positionWithOrphans.hasPosition && !positionWithOrphans.hasTriggeredAlerts && positionWithOrphans.armedAt == nil,
+              "完全没有提醒时保留持仓并清理孤立状态和时间")
+        let emptyWithOrphans = try StockTracking(upperTriggered: true, lowerTriggered: true, armedAt: now).validated()
+        check(emptyWithOrphans == StockTracking(), "空配置清理所有孤立提醒状态")
         print("PASS: \(checks) tracking assertions")
     }
 }

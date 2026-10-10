@@ -18,6 +18,7 @@ final class QuoteStore: ObservableObject {
     @Published var isAdjustingTransparency = false
     @Published var expandedSymbolID: String?
     @Published private(set) var tracking: [String: StockTracking] = [:]
+    @Published private(set) var invalidTracking: [String: StockTracking] = [:]
     @Published private(set) var priceAlerts: [String: String] = [:]
     @Published var notificationNotice: String?
     var onPriceAlert: ((PriceAlert) -> Void)?
@@ -51,7 +52,10 @@ final class QuoteStore: ObservableObject {
         if let data = defaults.data(forKey: "stockTracking"),
            let savedTracking = try? JSONDecoder().decode([String: StockTracking].self, from: data) {
             let ids = Set(symbols.map(\.id))
-            tracking = savedTracking.filter { ids.contains($0.key) }
+            for (id, value) in savedTracking where ids.contains(id) {
+                if let validated = try? value.validated() { tracking[id] = validated }
+                else { invalidTracking[id] = value }
+            }
         }
     }
 
@@ -73,12 +77,13 @@ final class QuoteStore: ObservableObject {
             throw NSError(domain: "StockTracking", code: 1, userInfo: [NSLocalizedDescriptionKey: "股票已移除，请重新添加。"])
         }
         var value = try StockTracking.parse(cost: cost, quantity: quantity, upper: upper, lower: lower)
-        let previous = tracking[symbol.id]
-        value.upperTriggered = value.upperPrice == previous?.upperPrice ? previous?.upperTriggered ?? false : false
-        value.lowerTriggered = value.lowerPrice == previous?.lowerPrice ? previous?.lowerTriggered ?? false : false
+        let previous = tracking[symbol.id] ?? invalidTracking[symbol.id]
+        value.upperTriggered = value.upperPrice != nil && value.upperPrice == previous?.upperPrice && previous?.upperTriggered == true
+        value.lowerTriggered = value.lowerPrice != nil && value.lowerPrice == previous?.lowerPrice && previous?.lowerTriggered == true
         let changedPrices = value.upperPrice != previous?.upperPrice || value.lowerPrice != previous?.lowerPrice
         value.armedAt = value.hasAlerts ? (changedPrices ? now : previous?.armedAt ?? now) : nil
         tracking[symbol.id] = value.hasPosition || value.hasAlerts ? value : nil
+        invalidTracking[symbol.id] = nil
         if changedPrices { priceAlerts[symbol.id] = nil }
         persistTracking()
         if value.hasAlerts { onAlertSetup?() }
@@ -112,7 +117,9 @@ final class QuoteStore: ObservableObject {
     }
 
     private func persistTracking() {
-        if let data = try? JSONEncoder().encode(tracking) { defaults.set(data, forKey: "stockTracking") }
+        // Preserve rejected entries for correction instead of deleting their saved fields.
+        let values = invalidTracking.merging(tracking) { _, valid in valid }
+        if let data = try? JSONEncoder().encode(values) { defaults.set(data, forKey: "stockTracking") }
     }
 
     func start() {
@@ -151,6 +158,7 @@ final class QuoteStore: ObservableObject {
         let ids = Set(values.map(\.id))
         quotes = quotes.filter { ids.contains($0.key) }
         tracking = tracking.filter { ids.contains($0.key) }
+        invalidTracking = invalidTracking.filter { ids.contains($0.key) }
         priceAlerts = priceAlerts.filter { ids.contains($0.key) }
         if let expandedSymbolID, !ids.contains(expandedSymbolID) { self.expandedSymbolID = nil }
         persistTracking()
@@ -208,16 +216,7 @@ final class QuoteStore: ObservableObject {
             do {
                 let incoming = try await client.fetch(requested)
                 guard !Task.isCancelled else { return }
-                let current = Set(symbols.map(\.id))
-                let requestedIDs = Set(requested.map(\.id)).intersection(current)
-                for (id, quote) in incoming where current.contains(id) {
-                    quotes[id] = quote
-                }
-                unavailable.subtract(requestedIDs)
-                unavailable.formUnion(requestedIDs.subtracting(incoming.keys))
-                lastReceipt = Date()
-                errorMessage = nil
-                evaluateAlerts(incoming, now: lastReceipt!)
+                receive(incoming, requested: requested, at: Date())
                 if isPreview {
                     let values = requested.compactMap { symbol -> String? in
                         guard let q = incoming[symbol.id] else { return nil }
@@ -237,6 +236,23 @@ final class QuoteStore: ObservableObject {
             isRefreshing = false
             request = nil
         }
+    }
+
+    func receive(_ incoming: [String: Quote], requested: [StockSymbol], at receipt: Date) {
+        let current = Set(symbols.map(\.id))
+        let requestedIDs = Set(requested.map(\.id)).intersection(current)
+        var accepted: [String: Quote] = [:]
+        for (id, quote) in incoming where requestedIDs.contains(id) {
+            guard quote.timestamp <= receipt.addingTimeInterval(5),
+                  quotes[id].map({ quote.timestamp >= $0.timestamp }) ?? true else { continue }
+            accepted[id] = quote
+            quotes[id] = quote
+        }
+        unavailable.subtract(requestedIDs)
+        unavailable.formUnion(requestedIDs.subtracting(accepted.keys))
+        lastReceipt = receipt
+        errorMessage = nil
+        evaluateAlerts(accepted, now: receipt)
     }
 }
 
@@ -270,6 +286,7 @@ struct QuoteRow: View {
     let failed: Bool
     let unavailable: Bool
     let configuration: StockTracking
+    let invalidConfiguration: StockTracking?
     let isExpanded: Bool
     let alertMessage: String?
     let notificationNotice: String?
@@ -310,6 +327,8 @@ struct QuoteRow: View {
                     if failed || unavailable {
                         Text(quote == nil ? "无行情" : "上次数据")
                             .font(.system(size: 9)).foregroundStyle(.orange)
+                    } else if invalidConfiguration != nil {
+                        Text("配置异常").font(.system(size: 9)).foregroundStyle(.orange)
                     }
                 }
                 Spacer(minLength: 8)
@@ -380,8 +399,10 @@ struct QuoteRow: View {
             if isExpanded {
                 VStack(spacing: 5) {
                     Divider().opacity(0.6)
-                    TrackingEditor(symbol: symbol, configuration: configuration,
-                                   notificationNotice: notificationNotice, save: save, rearm: rearm)
+                    TrackingEditor(symbol: symbol, configuration: invalidConfiguration ?? configuration,
+                                   notificationNotice: invalidConfiguration != nil
+                                       ? "保存的配置不合法，提醒已暂停；请修正后保存。" : notificationNotice,
+                                   save: save, rearm: rearm)
                         .frame(height: 154, alignment: .top)
                 }
             }
@@ -425,6 +446,7 @@ struct WidgetView: View {
                 ?? "连接失败 · 自动重试"
         }
         if !store.unavailable.isEmpty { return "部分股票无可用行情 · 自动刷新" }
+        if !store.invalidTracking.isEmpty { return "持仓或提醒配置异常 · 点击股票名称修正" }
         if let quoteTime {
             return "行情 \(DisplayFormat.chinaTime.string(from: quoteTime)) · 3秒刷新"
         }
@@ -517,6 +539,7 @@ struct WidgetView: View {
                                      failed: store.errorMessage != nil,
                                      unavailable: store.unavailable.contains(symbol.id),
                                      configuration: store.tracking[symbol.id] ?? StockTracking(),
+                                     invalidConfiguration: store.invalidTracking[symbol.id],
                                      isExpanded: store.expandedSymbolID == symbol.id,
                                      alertMessage: store.priceAlerts[symbol.id],
                                      notificationNotice: store.notificationNotice,
@@ -536,7 +559,7 @@ struct WidgetView: View {
             Divider().opacity(0.6)
             HStack(spacing: 6) {
                 Circle()
-                    .fill(additionError != nil || store.errorMessage != nil || !store.unavailable.isEmpty ? Color.orange
+                    .fill(additionError != nil || store.errorMessage != nil || !store.unavailable.isEmpty || !store.invalidTracking.isEmpty ? Color.orange
                           : store.lastReceipt != nil ? Color.green : Color.secondary)
                     .frame(width: 5, height: 5)
                 Text(status).lineLimit(1)

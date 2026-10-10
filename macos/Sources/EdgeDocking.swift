@@ -72,13 +72,14 @@ final class EdgeDockController {
     private var animationGeneration = 0
     private var enabled: Bool
 
-    init(panel: NSPanel, surface: DesktopHoverView, defaults: UserDefaults, enabled: Bool, keepVisible: @escaping () -> Bool) {
+    init(panel: NSPanel, surface: DesktopHoverView, defaults: UserDefaults, enabled: Bool,
+         handlePanel testingHandlePanel: NSPanel? = nil, keepVisible: @escaping () -> Bool) {
         self.panel = panel
         self.defaults = defaults
         self.keepVisible = keepVisible
         self.enabled = enabled
         handleView = EdgeHandleView(frame: .zero)
-        handlePanel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        handlePanel = testingHandlePanel ?? NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         handlePanel.title = "行情提示条"
         handlePanel.isReleasedWhenClosed = false
         handlePanel.isOpaque = false
@@ -294,7 +295,17 @@ final class EdgeDockController {
         }
     }
 
-    private func cancelAnimation() { animationGeneration += 1; animating = false }
+    private func cancelAnimation() {
+        animationGeneration += 1
+        if animating {
+            // Ignoring completion alone does not stop AppKit from moving the window.
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                panel.animator().setFrame(panel.frame, display: true)
+            }
+        }
+        animating = false
+    }
 
     private func schedule(after delay: TimeInterval, action: @escaping () -> Void) {
         cancelTimer()
