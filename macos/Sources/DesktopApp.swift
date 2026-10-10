@@ -4,7 +4,7 @@ import Combine
 import UserNotifications
 
 private let quoteRowHeight: CGFloat = 78
-private let trackingEditorHeight: CGFloat = 160
+private let trackingEditorHeight: CGFloat = 220
 
 @MainActor
 final class QuoteStore: ObservableObject {
@@ -20,6 +20,7 @@ final class QuoteStore: ObservableObject {
     @Published private(set) var tracking: [String: StockTracking] = [:]
     @Published private(set) var invalidTracking: [String: StockTracking] = [:]
     @Published private(set) var priceAlerts: [String: String] = [:]
+    @Published private(set) var buyCommissionRate: String
     @Published var notificationNotice: String?
     var onPriceAlert: ((PriceAlert) -> Void)?
     var onAlertSetup: (() -> Void)?
@@ -47,6 +48,7 @@ final class QuoteStore: ObservableObject {
         let saved = preview ?? defaults.string(forKey: "symbols") ?? ""
         self.symbols = (try? StockSymbol.parseList(saved)) ?? []
         self.isPinned = defaults.object(forKey: "pinned") as? Bool ?? false
+        self.buyCommissionRate = defaults.string(forKey: "buyCommissionRate") ?? "2.5"
         self.autoHideEnabled = defaults.object(forKey: "autoHideEnabled") as? Bool ?? true
         self.backgroundTransparency = min(1, max(0, defaults.object(forKey: "backgroundTransparency") as? Double ?? 0.3))
         if let data = defaults.data(forKey: "stockTracking"),
@@ -72,11 +74,15 @@ final class QuoteStore: ObservableObject {
         }, 570)
     }
 
-    func saveTracking(for symbol: StockSymbol, cost: String, quantity: String, upper: String, lower: String, now: Date = Date()) throws {
+    func saveTracking(for symbol: StockSymbol, cost: String, quantity: String, upper: String, lower: String,
+                      totalCost: String = "", purchaseAmount: String = "", purchaseCommissionRate: Decimal? = nil,
+                      now: Date = Date()) throws {
         guard symbols.contains(symbol) else {
             throw NSError(domain: "StockTracking", code: 1, userInfo: [NSLocalizedDescriptionKey: "股票已移除，请重新添加。"])
         }
-        var value = try StockTracking.parse(cost: cost, quantity: quantity, upper: upper, lower: lower)
+        var value = try StockTracking.parse(cost: cost, quantity: quantity, upper: upper, lower: lower,
+                                           totalCost: totalCost, purchaseAmount: purchaseAmount,
+                                           purchaseCommissionRate: purchaseCommissionRate)
         let previous = tracking[symbol.id] ?? invalidTracking[symbol.id]
         value.upperTriggered = value.upperPrice != nil && value.upperPrice == previous?.upperPrice && previous?.upperTriggered == true
         value.lowerTriggered = value.lowerPrice != nil && value.lowerPrice == previous?.lowerPrice && previous?.lowerTriggered == true
@@ -87,6 +93,25 @@ final class QuoteStore: ObservableObject {
         if changedPrices { priceAlerts[symbol.id] = nil }
         persistTracking()
         if value.hasAlerts { onAlertSetup?() }
+    }
+
+    func savePosition(for symbol: StockSymbol, amount: String, quantity: String, upper: String, lower: String,
+                      estimateFees: Bool, commissionRate: String, now: Date = Date()) throws {
+        if estimateFees && !amount.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let estimate = try BuyFeeEstimate.calculate(amount: amount, commissionRate: commissionRate, symbol: symbol)
+            let previousRate = (tracking[symbol.id] ?? invalidTracking[symbol.id])?.purchaseCommissionRate
+            try saveTracking(for: symbol, cost: "", quantity: quantity, upper: upper, lower: lower,
+                             totalCost: estimate.totalCostText,
+                             purchaseAmount: NSDecimalNumber(decimal: estimate.purchaseAmountYuan).stringValue,
+                             purchaseCommissionRate: estimate.commissionRatePerTenThousand, now: now)
+            if previousRate != estimate.commissionRatePerTenThousand {
+                buyCommissionRate = commissionRate.trimmingCharacters(in: .whitespacesAndNewlines)
+                defaults.set(buyCommissionRate, forKey: "buyCommissionRate")
+            }
+        } else {
+            try saveTracking(for: symbol, cost: "", quantity: quantity, upper: upper, lower: lower,
+                             totalCost: amount, now: now)
+        }
     }
 
     func rearmAlerts(for symbol: StockSymbol, now: Date = Date()) {
@@ -290,8 +315,9 @@ struct QuoteRow: View {
     let isExpanded: Bool
     let alertMessage: String?
     let notificationNotice: String?
+    let commissionRate: String
     let configure: () -> Void
-    let save: (String, String, String, String) throws -> Void
+    let save: (String, String, String, String, Bool, String) throws -> Void
     let rearm: () -> Void
     let remove: () -> Void
 
@@ -329,6 +355,8 @@ struct QuoteRow: View {
                             .font(.system(size: 9)).foregroundStyle(.orange)
                     } else if invalidConfiguration != nil {
                         Text("配置异常").font(.system(size: 9)).foregroundStyle(.orange)
+                    } else if configuration.purchaseAmountYuan != nil {
+                        Text("费用预估").font(.system(size: 9)).foregroundStyle(.orange)
                     }
                 }
                 Spacer(minLength: 8)
@@ -372,14 +400,20 @@ struct QuoteRow: View {
             if configuration.hasPosition {
                 HStack(spacing: 10) {
                     metric("成本", value: configuration.costPrice.map { String(format: "%.3f", $0) } ?? "—")
-                        .help("\(configuration.quantity ?? 0)股；成本由你手动填写")
-                    metric("浮盈亏", value: profit.map { String(format: "%+.2f", $0.amount) } ?? "—")
+                        .help(configuration.totalCostYuan != nil
+                              ? "\(configuration.quantity ?? 0)股；含费总成本\(configuration.totalCostText)元；单股成本自动计算"
+                              : "\(configuration.quantity ?? 0)股；原手动成本，总成本\(configuration.totalCostText)元为估算")
+                    metric("浮盈亏", value: profit?.amountText ?? "—")
                         .foregroundStyle(profitColor)
                     metric("盈亏率", value: profit.map { String(format: "%+.2f%%", $0.percent) } ?? "—")
                         .foregroundStyle(profitColor)
                 }
                 .font(.system(size: 10)).lineLimit(1).foregroundStyle(.secondary)
-                .help("按最新可用报价与填写的成本、股数估算浮盈亏；不额外扣除费用")
+                .help(configuration.purchaseAmountYuan != nil
+                      ? "费用按单笔买入委托及设置的佣金率预估；费用落账后可切换为实际含费总成本"
+                      : configuration.totalCostYuan != nil
+                      ? "浮盈亏＝最新可用报价×持仓股数−含费总成本；不再另扣手续费"
+                      : "原配置仍按单股成本×股数估算；可点击名称填写含费总成本，避免单股成本舍入偏差")
             }
             if configuration.hasAlerts {
                 HStack(spacing: 6) {
@@ -400,10 +434,11 @@ struct QuoteRow: View {
                 VStack(spacing: 5) {
                     Divider().opacity(0.6)
                     TrackingEditor(symbol: symbol, configuration: invalidConfiguration ?? configuration,
+                                   commissionRate: commissionRate,
                                    notificationNotice: invalidConfiguration != nil
                                        ? "保存的配置不合法，提醒已暂停；请修正后保存。" : notificationNotice,
                                    save: save, rearm: rearm)
-                        .frame(height: 154, alignment: .top)
+                        .frame(height: 214, alignment: .top)
                 }
             }
         }
@@ -543,9 +578,11 @@ struct WidgetView: View {
                                      isExpanded: store.expandedSymbolID == symbol.id,
                                      alertMessage: store.priceAlerts[symbol.id],
                                      notificationNotice: store.notificationNotice,
+                                     commissionRate: store.buyCommissionRate,
                                      configure: { configure(symbol) },
-                                     save: { cost, quantity, upper, lower in
-                                         try store.saveTracking(for: symbol, cost: cost, quantity: quantity, upper: upper, lower: lower)
+                                     save: { amount, quantity, upper, lower, estimateFees, commissionRate in
+                                         try store.savePosition(for: symbol, amount: amount, quantity: quantity, upper: upper, lower: lower,
+                                                                estimateFees: estimateFees, commissionRate: commissionRate)
                                          store.expandedSymbolID = nil
                                      },
                                      rearm: { store.rearmAlerts(for: symbol) },

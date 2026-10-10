@@ -47,6 +47,118 @@ enum TrackingTests {
         }
         let single = try StockTracking.parse(cost: "10", quantity: "1", upper: "", lower: "")
         check(single.profit(at: 11)?.amount == 1, "数量单位为股且允许非整手数量")
+        let preciseData = Data(#"{"costPrice":10.123,"quantity":500,"totalCostYuan":5062.08,"upperTriggered":false,"lowerTriggered":false}"#.utf8)
+        let precisePosition = try JSONDecoder().decode(StockTracking.self, from: preciseData).validated()
+        check(precisePosition.profit(at: 12).map { String(describing: $0.amount) } == "937.92",
+              "精确总成本优先于三位小数成本价，避免0.58元差额")
+        check(precisePosition.costPrice == 10.12416, "恢复总成本时展示均价也由实际总成本重算")
+        let halfCent = try StockTracking.parse(cost: "0.005", quantity: "1", upper: "", lower: "")
+        check(halfCent.profit(at: 1)?.amount == 1, "浮盈亏的半分钱按分四舍五入")
+        check(halfCent.profit(at: 1)?.amountText == "+1.00", "金额显示使用十进制两位小数与显式正号")
+        let totalPosition = try StockTracking.parse(cost: "", quantity: "500", upper: "", lower: "", totalCost: " 05062.08 ")
+        check(totalPosition.hasPosition && totalPosition.totalCostYuan == Decimal(string: "5062.08"), "总成本与股数即可设置持仓")
+        check(totalPosition.costPrice == 10.12416, "单股成本由精确总成本自动计算用于展示")
+        check(totalPosition.totalCostText == "5062.08", "总成本编辑预填保留分并去掉多余前导零")
+        let preciseProfit = totalPosition.profit(at: 12)!
+        check(preciseProfit.amount == Decimal(string: "937.92") && preciseProfit.amountText == "+937.92", "按总成本计算精确盈亏且不重复扣除费用")
+        check(abs(preciseProfit.percent - (937.92 / 5062.08 * 100)) < 0.00000001, "盈亏率分母使用精确总成本")
+        let withoutAverage = StockTracking(quantity: 500, totalCostYuan: Decimal(string: "5062.08"))
+        check(withoutAverage.hasPosition && withoutAverage.profit(at: 12)?.amountText == "+937.92", "已有总成本时不依赖展示均价计算盈亏")
+        let validatedTotal = try withoutAverage.validated()
+        check(validatedTotal == totalPosition, "恢复总成本持仓时可补出展示均价")
+        let preciseRoundtrip = try JSONDecoder().decode(StockTracking.self, from: JSONEncoder().encode(totalPosition)).validated()
+        check(preciseRoundtrip == totalPosition && preciseRoundtrip.totalCostText == "5062.08", "持久化和恢复保留总成本的分精度")
+        let purchaseData = Data(#"{"quantity":100,"totalCostYuan":1005,"purchaseAmountYuan":1000,"upperTriggered":false,"lowerTriggered":false}"#.utf8)
+        let purchaseDecoded = try JSONDecoder().decode(StockTracking.self, from: purchaseData).validated()
+        let purchaseJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(purchaseDecoded)) as! [String: Any]
+        check((purchaseJSON["purchaseAmountYuan"] as? NSNumber)?.stringValue == "1000", "持久化恢复保留原成交金额，避免编辑再保存重复加费")
+        let purchasePosition = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", totalCost: "1005.00", purchaseAmount: " 01000.00 ")
+        check(purchasePosition.purchaseAmountYuan == Decimal(1000) && purchaseDecoded == purchasePosition, "成交金额按分保存并通过恢复校验")
+        check(purchasePosition.profit(at: 12)?.amountText == "+195.00", "成交金额只标记费用预估来源，不重新计算或重复增加费用")
+        let rateData = Data(#"{"quantity":100,"totalCostYuan":1005,"purchaseAmountYuan":1000,"purchaseCommissionRate":2.5,"upperTriggered":false,"lowerTriggered":false}"#.utf8)
+        let rateDecoded = try JSONDecoder().decode(StockTracking.self, from: rateData).validated()
+        let rateJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(rateDecoded)) as! [String: Any]
+        check((rateJSON["purchaseCommissionRate"] as? NSNumber)?.stringValue == "2.5", "持久化恢复保留每笔持仓采用的费率，避免全局费率变化改写历史预估")
+        let ratePosition = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", totalCost: "1005", purchaseAmount: "1000", purchaseCommissionRate: Decimal(string: "2.5"))
+        check(ratePosition.purchaseCommissionRate == Decimal(string: "2.5") && ratePosition == rateDecoded, "按每笔持仓保存传入的十进制费率")
+        check(ratePosition.profit(at: 12)?.amountText == "+195.00", "费率来源仅用于恢复，不改变已保存总成本与盈亏")
+        check(purchaseDecoded.purchaseCommissionRate == nil && purchasePosition.purchaseCommissionRate == nil, "旧预估持仓缺少费率字段时仍可恢复")
+        let maximumRate = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", totalCost: "1005", purchaseAmount: "1000", purchaseCommissionRate: Decimal(30))
+        check(maximumRate.purchaseCommissionRate == Decimal(30), "每笔费率允许有效范围的上界30")
+        for rate in [Decimal.nan, Decimal.zero, Decimal(-1), Decimal(string: "30.001")!] {
+            rejects("每笔佣金费率必须为大于0且不超过30的有效十进制数") {
+                _ = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", totalCost: "1005", purchaseAmount: "1000", purchaseCommissionRate: rate)
+            }
+            rejects("恢复配置拒绝非法每笔佣金费率") {
+                _ = try StockTracking(quantity: 100, totalCostYuan: Decimal(1005), purchaseAmountYuan: Decimal(1000), purchaseCommissionRate: rate).validated()
+            }
+        }
+        rejects("没有成交金额时不能保存孤立费率") { _ = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", totalCost: "1005", purchaseCommissionRate: Decimal(string: "2.5")) }
+        rejects("没有持仓时不能保存费率") { _ = try StockTracking.parse(cost: "", quantity: "", upper: "", lower: "", purchaseCommissionRate: Decimal(string: "2.5")) }
+        rejects("恢复配置拒绝没有成交金额的孤立费率") { _ = try StockTracking(quantity: 100, totalCostYuan: Decimal(1005), purchaseCommissionRate: Decimal(string: "2.5")).validated() }
+        rejects("恢复配置拒绝没有持仓的孤立费率") { _ = try StockTracking(purchaseCommissionRate: Decimal(string: "2.5")).validated() }
+        let purchaseEqualTotal = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", totalCost: "1000", purchaseAmount: "1000")
+        check(purchaseEqualTotal.purchaseAmountYuan == purchaseEqualTotal.totalCostYuan, "原成交金额允许等于总成本")
+        let clearedPurchase = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", totalCost: "1005", purchaseAmount: " \n ")
+        check(clearedPurchase.purchaseAmountYuan == nil && clearedPurchase.purchaseCommissionRate == nil && clearedPurchase.totalCostYuan == Decimal(1005), "切换实填总成本时清除成交金额与费率预估来源")
+        for text in ["0", "-1", "nan", "inf", "1e3", "1.001", "1000.00abc", "１.００", "99999999999999999999999999999999999999.99"] {
+            rejects("原成交金额必须是可精确表达的正金额且最多两位小数：\(text)") {
+                _ = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", totalCost: "1005", purchaseAmount: text)
+            }
+        }
+        rejects("原成交金额不能大于持仓总成本") { _ = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", totalCost: "1005", purchaseAmount: "1005.01") }
+        rejects("仅有原成交金额不能保存为持仓") { _ = try StockTracking.parse(cost: "", quantity: "", upper: "", lower: "", purchaseAmount: "1000") }
+        rejects("原成交金额必须与股数一起保存") { _ = try StockTracking.parse(cost: "", quantity: "", upper: "", lower: "", totalCost: "1005", purchaseAmount: "1000") }
+        rejects("原成交金额必须有对应的实际总成本") { _ = try StockTracking.parse(cost: "10", quantity: "100", upper: "", lower: "", purchaseAmount: "1000") }
+        for value in [Decimal.zero, Decimal(-1), Decimal.nan, Decimal(string: "0.001")!, Decimal(1006)] {
+            rejects("恢复配置不能接受非法或大于总成本的原成交金额") {
+                _ = try StockTracking(quantity: 100, totalCostYuan: Decimal(1005), purchaseAmountYuan: value).validated()
+            }
+        }
+        rejects("恢复原成交金额时不能缺少总成本") { _ = try StockTracking(costPrice: 10, quantity: 100, purchaseAmountYuan: Decimal(1000)).validated() }
+        rejects("恢复原成交金额时不能缺少股数") { _ = try StockTracking(totalCostYuan: Decimal(1005), purchaseAmountYuan: Decimal(1000)).validated() }
+        let estimatedAlerts = StockTracking(quantity: 100, upperPrice: 12, upperTriggered: true,
+                                           armedAt: Date(timeIntervalSince1970: 1234), totalCostYuan: Decimal(1005),
+                                           purchaseAmountYuan: Decimal(1000), purchaseCommissionRate: Decimal(string: "2.5"))
+        let restoredEstimatedAlerts = try JSONDecoder().decode(StockTracking.self, from: JSONEncoder().encode(estimatedAlerts)).validated()
+        check(restoredEstimatedAlerts.purchaseAmountYuan == Decimal(1000) && restoredEstimatedAlerts.purchaseCommissionRate == Decimal(string: "2.5") && restoredEstimatedAlerts.upperTriggered && restoredEstimatedAlerts.armedAt == estimatedAlerts.armedAt,
+              "成交金额和费率恢复验证仍保留提醒触发状态与设定时间")
+        let oldData = Data(#"{"costPrice":10.123,"quantity":500,"upperTriggered":false,"lowerTriggered":false}"#.utf8)
+        let oldPosition = try JSONDecoder().decode(StockTracking.self, from: oldData).validated()
+        check(oldPosition.totalCostYuan == nil && oldPosition.profit(at: 12)?.amountText == "+938.50", "旧配置缺失总成本字段时仍按原成本价恢复")
+        check(oldPosition.purchaseAmountYuan == nil && totalPosition.purchaseAmountYuan == nil, "旧配置和按实填写总成本的配置缺失成交金额字段时不标记为预估")
+        check(oldPosition.totalCostText == "5061.50" && halfCent.totalCostText == "0.01", "旧配置总成本预填由成本价乘股数按分估算")
+        check(empty.totalCostText.isEmpty, "没有持仓时总成本预填为空")
+        let centLoss = try StockTracking.parse(cost: "0.015", quantity: "1", upper: "", lower: "")
+        check(centLoss.profit(at: 0.01)?.amount == Decimal(string: "-0.01") && centLoss.profit(at: 0.01)?.amountText == "-0.01", "负半分钱同样按分四舍五入")
+        let roundedZero = try StockTracking.parse(cost: "1.004", quantity: "1", upper: "", lower: "")
+        check(roundedZero.profit(at: 1)?.amount == 0 && roundedZero.profit(at: 1)?.amountText == "+0.00", "小于半分钱的负值归零且不显示负零")
+        let totalLoss = try StockTracking.parse(cost: "", quantity: "40", upper: "", lower: "", totalCost: "800.40")
+        check(totalLoss.profit(at: 19)?.amountText == "-40.40", "总成本模式保留负盈亏的金额与负号")
+        check(abs(totalLoss.profit(at: 19)!.percent - (-40.40 / 800.40 * 100)) < 0.00000001, "负盈亏率同样按实际总成本计算")
+        let totalZero = try StockTracking.parse(cost: "", quantity: "500", upper: "", lower: "", totalCost: "5000")
+        check(totalZero.profit(at: 10)?.amountText == "+0.00" && totalZero.profit(at: 10)?.percent == 0, "总成本等于市值时金额和盈亏率归零")
+        let partialYuan = try StockTracking.parse(cost: "", quantity: "1", upper: "", lower: "", totalCost: ".50")
+        check(partialYuan.totalCostText == "0.50", "总成本可输入不足一元的十进制金额")
+        for text in ["0", "-1", "nan", "inf", "-inf", "5e3", "1e999", "1.00abc", "1,000.00", "１.２３", "1.001", "1.000", ".", "1.", "+1"] {
+            rejects("总成本应是正数且最多两位小数，科学记数和局部有效输入不能通过：\(text)") {
+                _ = try StockTracking.parse(cost: "", quantity: "500", upper: "", lower: "", totalCost: text)
+            }
+        }
+        for text in ["99999999999999999999999999999999999999.99", String(repeating: "9", count: 200)] {
+            rejects("不能精确表达或溢出的总成本应被拒绝") {
+                _ = try StockTracking.parse(cost: "", quantity: "500", upper: "", lower: "", totalCost: text)
+            }
+        }
+        rejects("没有股数时不能填写总成本") { _ = try StockTracking.parse(cost: "", quantity: "", upper: "", lower: "", totalCost: "100") }
+        rejects("总成本与旧成本均为空时不能只填股数") { _ = try StockTracking.parse(cost: "", quantity: "500", upper: "", lower: "", totalCost: "") }
+        for value in [Decimal.zero, Decimal(-1), Decimal.nan, Decimal(string: "0.001")!] {
+            let invalidTotal = StockTracking(quantity: 500, totalCostYuan: value)
+            rejects("恢复配置不能接受非法总成本") { _ = try invalidTotal.validated() }
+            check(invalidTotal.profit(at: 12) == nil, "非法总成本不能生成盈亏")
+        }
+        rejects("恢复总成本也必须有正股数") { _ = try StockTracking(totalCostYuan: Decimal(100)).validated() }
+        check(StockTracking(quantity: 0, totalCostYuan: Decimal(100)).profit(at: 12) == nil, "总成本模式非正股数不能生成盈亏")
         let large = try StockTracking.parse(cost: "1e300", quantity: "100", upper: "", lower: "")
         check(large.profit(at: 1e308) == nil, "市值溢出时不能显示非有限盈亏")
         let tiny = try StockTracking.parse(cost: "1e-308", quantity: "1", upper: "", lower: "")

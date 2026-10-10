@@ -147,6 +147,61 @@ struct WatchlistTests {
         try repairedStore.saveTracking(for: primary, cost: "10", quantity: "100", upper: "13", lower: "",
                                        now: Date(timeIntervalSince1970: 1102))
         check(repairedStore.tracking[primary.id]?.upperTriggered == false && repairedStore.tracking[primary.id]?.armedAt == Date(timeIntervalSince1970: 1102), "修正后改价仍可重新启用提醒")
+        let exactData = Data(#"{"sh600108":{"costPrice":10.123,"quantity":500,"totalCostYuan":5062.08,"upperPrice":13,"upperTriggered":true,"lowerTriggered":false,"armedAt":100}}"#.utf8)
+        defaults.set(exactData, forKey: "stockTracking")
+        let exactStore = QuoteStore(defaults: defaults, preview: nil)
+        exactStore.suspend()
+        let exactProfit = exactStore.tracking[primary.id]?.profit(at: 12)
+        check(exactProfit.map { Decimal(string: String(describing: $0.amount)) == Decimal(string: "937.92") } == true, "加载精确总成本后不再放大单股成本舍入误差")
+        try exactStore.saveTracking(for: primary, cost: "", quantity: "500", upper: "13", lower: "", totalCost: "5063.10")
+        let savedExact = QuoteStore(defaults: defaults, preview: nil)
+        savedExact.suspend()
+        check(savedExact.tracking[primary.id]?.totalCostYuan == Decimal(string: "5063.10"), "总成本保存重启后保留到分")
+        check(savedExact.tracking[primary.id]?.upperTriggered == true && savedExact.tracking[primary.id]?.armedAt == exactStore.tracking[primary.id]?.armedAt, "修改总成本不重置已触发的未变阈值")
+        check(savedExact.tracking[primary.id]?.profit(at: 12)?.amountText == "+936.90", "新总成本直接用于盈亏并补足两位小数")
+        let beforeBadTotal = exactStore.tracking[primary.id]
+        rejects({ try exactStore.saveTracking(for: primary, cost: "", quantity: "500", upper: "13", lower: "", totalCost: "5063.101") }, "总成本超过两位小数不能保存")
+        check(exactStore.tracking[primary.id] == beforeBadTotal, "无效总成本不能破坏已有持仓与提醒")
+        try exactStore.saveTracking(for: primary, cost: "", quantity: "", upper: "13", lower: "", totalCost: "")
+        check(exactStore.tracking[primary.id]?.hasPosition == false && exactStore.tracking[primary.id]?.upperTriggered == true, "清空总成本和股数可关闭持仓并保留提醒")
+        try exactStore.savePosition(for: primary, amount: "40000", quantity: "4000", upper: "13", lower: "",
+                                    estimateFees: true, commissionRate: "2.5")
+        check(exactStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40010.40") && exactStore.tracking[primary.id]?.purchaseAmountYuan == 40000, "沪市成交金额自动加预估佣金和过户费，并保存原金额")
+        check(exactStore.tracking[primary.id]?.profit(at: 10)?.amountText == "-10.40", "自动买入费用实际计入持仓盈亏")
+        check(exactStore.tracking[primary.id]?.upperTriggered == true, "估算费用不重置未改阈值的已提醒状态")
+        let reloadedFeeStore = QuoteStore(defaults: defaults, preview: nil)
+        reloadedFeeStore.suspend()
+        check(reloadedFeeStore.tracking[primary.id] == exactStore.tracking[primary.id] && reloadedFeeStore.buyCommissionRate == "2.5", "费用口径及一次设置的佣金率可恢复")
+        try reloadedFeeStore.savePosition(for: primary, amount: "40000", quantity: "4000", upper: "13", lower: "",
+                                          estimateFees: true, commissionRate: "2.5")
+        check(reloadedFeeStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40010.40"), "用保存的原成交金额再保存不会重复加手续费")
+        try exactStore.savePosition(for: secondary, amount: "10000", quantity: "1000", upper: "", lower: "",
+                                    estimateFees: true, commissionRate: "2.5")
+        check(exactStore.tracking[secondary.id]?.totalCostYuan == 10005 && exactStore.tracking[secondary.id]?.purchaseAmountYuan == 10000, "深圳按公示及预估口径收最低佣金")
+        let beforeFeeError = exactStore.tracking[primary.id]
+        rejects({ try exactStore.savePosition(for: primary, amount: "40000", quantity: "4000", upper: "13", lower: "", estimateFees: true, commissionRate: "abc") }, "无效佣金率不能保存")
+        check(exactStore.tracking[primary.id] == beforeFeeError && exactStore.buyCommissionRate == "2.5", "无效费率保留原持仓和设置")
+        try exactStore.savePosition(for: primary, amount: "40000", quantity: "4000", upper: "13", lower: "",
+                                    estimateFees: true, commissionRate: "1.8")
+        check(exactStore.buyCommissionRate == "1.8" && exactStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40007.60"), "修改账户佣金率后按新费率估算并记住")
+        let feeRecord = try JSONSerialization.jsonObject(with: JSONEncoder().encode(exactStore.tracking[primary.id]!)) as! [String: Any]
+        check((feeRecord["purchaseCommissionRate"] as? NSNumber)?.decimalValue == Decimal(string: "1.8"), "每笔持仓保存采用的费率，不能仅依赖后来变化的全局费率")
+        try exactStore.savePosition(for: secondary, amount: "10000", quantity: "1000", upper: "", lower: "",
+                                    estimateFees: true, commissionRate: "3")
+        let historicalStore = QuoteStore(defaults: defaults, preview: nil)
+        historicalStore.suspend()
+        let historicalPosition = historicalStore.tracking[primary.id]!
+        check(historicalStore.buyCommissionRate == "3" && historicalPosition.purchaseCommissionRate == Decimal(string: "1.8"), "新持仓改变全局费率不能改变旧持仓所用费率")
+        try historicalStore.savePosition(for: primary,
+                                          amount: NSDecimalNumber(decimal: historicalPosition.purchaseAmountYuan!).stringValue,
+                                          quantity: "4000", upper: "13", lower: "", estimateFees: true,
+                                          commissionRate: NSDecimalNumber(decimal: historicalPosition.purchaseCommissionRate!).stringValue)
+        check(historicalStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40007.60"), "重开旧持仓使用该笔费率，仅编辑提醒不重算为全局新费率")
+        check(historicalStore.buyCommissionRate == "3", "重存旧持仓未修改费率时不把全局新费率改回旧值")
+        try exactStore.savePosition(for: primary, amount: "40007.59", quantity: "4000", upper: "13", lower: "",
+                                    estimateFees: false, commissionRate: "abc")
+        check(exactStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40007.59") && exactStore.tracking[primary.id]?.purchaseAmountYuan == nil, "实际含费总成本不再扣费，也不再标记预估")
+        check(exactStore.buyCommissionRate == "3" && exactStore.tracking[primary.id]?.upperTriggered == true && exactStore.tracking[primary.id]?.purchaseCommissionRate == nil, "按实核对保留佣金设置及已提醒状态，并清除预估费率")
         print("PASS: \(count) watchlist assertions")
     }
 }
