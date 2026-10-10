@@ -202,6 +202,60 @@ struct WatchlistTests {
                                     estimateFees: false, commissionRate: "abc")
         check(exactStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40007.59") && exactStore.tracking[primary.id]?.purchaseAmountYuan == nil, "实际含费总成本不再扣费，也不再标记预估")
         check(exactStore.buyCommissionRate == "3" && exactStore.tracking[primary.id]?.upperTriggered == true && exactStore.tracking[primary.id]?.purchaseCommissionRate == nil, "按实核对保留佣金设置及已提醒状态，并清除预估费率")
+        let actualBeforeAlertEdit = exactStore.tracking[primary.id]!
+        var alertEditError: Error?
+        do {
+            try exactStore.savePosition(for: primary, amount: " \n ", quantity: " 4000 ", upper: "13", lower: "9",
+                                        estimateFees: true, commissionRate: "abc", now: Date(timeIntervalSince1970: 2000))
+        } catch { alertEditError = error }
+        check(alertEditError == nil, "实际持仓普通编辑未填成交金额且股数不变时，保存提醒应保留已有成本")
+        let actualAfterAlertEdit = exactStore.tracking[primary.id]!
+        check(actualAfterAlertEdit.totalCostYuan == actualBeforeAlertEdit.totalCostYuan && actualAfterAlertEdit.costPrice == actualBeforeAlertEdit.costPrice
+              && actualAfterAlertEdit.quantity == actualBeforeAlertEdit.quantity && actualAfterAlertEdit.purchaseAmountYuan == nil && actualAfterAlertEdit.purchaseCommissionRate == nil,
+              "仅编辑提醒不能把实际总成本改为空或转为费用预估")
+        check(actualAfterAlertEdit.lowerPrice == 9 && actualAfterAlertEdit.upperTriggered && actualAfterAlertEdit.armedAt == Date(timeIntervalSince1970: 2000),
+              "保留持仓时仍保存新的提醒，并保留未变阈值的触发标记")
+        check(exactStore.buyCommissionRate == "3", "仅保存提醒不校验或改写账户费率")
+        let actualAlertReloaded = QuoteStore(defaults: defaults, preview: nil)
+        actualAlertReloaded.suspend()
+        check(actualAlertReloaded.tracking[primary.id] == actualAfterAlertEdit, "提醒编辑后重启仍保留实际总成本")
+        try exactStore.savePosition(for: primary, amount: "40000", quantity: "4000", upper: "13", lower: "9",
+                                    estimateFees: true, commissionRate: "2.5")
+        check(exactStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40010.40") && exactStore.tracking[primary.id]?.purchaseAmountYuan == 40000,
+              "已有实际持仓填写新的成交金额时仍自动计入费用")
+        let estimatedBeforeBlank = exactStore.tracking[primary.id]
+        rejects({ try exactStore.savePosition(for: primary, amount: "", quantity: "4000", upper: "13", lower: "9", estimateFees: true, commissionRate: "2.5") },
+                "已有原成交金额的预估持仓不能用空金额覆盖")
+        check(exactStore.tracking[primary.id] == estimatedBeforeBlank, "拒绝空成交金额后预估持仓保持不变")
+        try exactStore.savePosition(for: primary, amount: "1005", quantity: "100", upper: "13", lower: "9",
+                                    estimateFees: false, commissionRate: "2.5")
+        let actualBeforeBadQuantity = exactStore.tracking[primary.id]
+        rejects({ try exactStore.savePosition(for: primary, amount: "", quantity: "101", upper: "13", lower: "9", estimateFees: true, commissionRate: "2.5") },
+                "成交金额空而股数变化时仍要求配对输入")
+        rejects({ try exactStore.savePosition(for: primary, amount: "", quantity: "0100", upper: "13", lower: "9", estimateFees: true, commissionRate: "2.5") },
+                "股数需在去除首尾空白后与原文本完全相同才保留持仓")
+        check(exactStore.tracking[primary.id] == actualBeforeBadQuantity, "配对输入拒绝不会改写原持仓")
+        try exactStore.savePosition(for: primary, amount: "", quantity: "", upper: "13", lower: "9", estimateFees: true, commissionRate: "2.5")
+        check(exactStore.tracking[primary.id]?.hasPosition == false && exactStore.tracking[primary.id]?.upperPrice == 13,
+              "成交金额和股数同时清空仍可删除持仓并保留提醒")
+        try exactStore.saveTracking(for: primary, cost: "10.123", quantity: "500", upper: "13", lower: "9")
+        let legacyBeforeAlertEdit = exactStore.tracking[primary.id]!
+        try exactStore.savePosition(for: primary, amount: "", quantity: "500", upper: "14", lower: "9",
+                                    estimateFees: true, commissionRate: "abc")
+        check(exactStore.tracking[primary.id]?.costPrice == legacyBeforeAlertEdit.costPrice && exactStore.tracking[primary.id]?.quantity == 500
+              && exactStore.tracking[primary.id]?.totalCostYuan == nil && exactStore.tracking[primary.id]?.purchaseAmountYuan == nil,
+              "旧均价持仓仅改提醒时保持旧存储口径，不升级为估算总成本")
+        let legacyAlertReloaded = QuoteStore(defaults: defaults, preview: nil)
+        legacyAlertReloaded.suspend()
+        check(legacyAlertReloaded.tracking[primary.id]?.totalCostYuan == nil && legacyAlertReloaded.tracking[primary.id]?.profit(at: 12)?.amountText == "+938.50",
+              "旧均价持仓保存提醒重启后仍按原成本计算")
+        defaults.set(try JSONEncoder().encode([primary.id: malformed]), forKey: "stockTracking")
+        let invalidAlertStore = QuoteStore(defaults: defaults, preview: nil)
+        invalidAlertStore.suspend()
+        rejects({ try invalidAlertStore.savePosition(for: primary, amount: "", quantity: "100", upper: "13", lower: "9", estimateFees: true, commissionRate: "2.5") },
+                "异常旧配置不能借空成交金额保存进入保留持仓分支")
+        check(invalidAlertStore.tracking[primary.id] == nil && invalidAlertStore.invalidTracking[primary.id] == malformed,
+              "异常配置需要明确修正，原数据仍保留")
         print("PASS: \(count) watchlist assertions")
     }
 }

@@ -23,8 +23,9 @@ struct TrackingEditor: View {
         self.notificationNotice = notificationNotice
         self.save = save
         self.rearm = rearm
-        _totalCost = State(initialValue: configuration.purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? configuration.totalCostText)
-        _estimateFees = State(initialValue: configuration.purchaseAmountYuan != nil || !configuration.hasPosition)
+        // A saved fee-inclusive cost must never become the ordinary purchase-amount input.
+        _totalCost = State(initialValue: configuration.purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "")
+        _estimateFees = State(initialValue: true)
         _commissionRate = State(initialValue: configuration.purchaseCommissionRate.map { NSDecimalNumber(decimal: $0).stringValue } ?? commissionRate)
         _quantity = State(initialValue: configuration.quantity.map(String.init) ?? "")
         _upper = State(initialValue: configuration.upperPrice.map { String($0) } ?? "")
@@ -33,14 +34,24 @@ struct TrackingEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("金额口径", selection: $estimateFees) {
-                Text("单笔成交 · 预估费用").tag(true)
-                Text("含费总成本").tag(false)
+            HStack {
+                Text(estimateFees ? "买入金额自动加费" : "含费总成本 · 不再加费")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(estimateFees ? Color.secondary : Color.orange)
+                Spacer(minLength: 2)
+                Button(estimateFees ? "校准含费总成本" : "返回买入金额") {
+                    estimateFees.toggle()
+                    totalCost = estimateFees
+                        ? configuration.purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""
+                        : configuration.totalCostText
+                    error = nil
+                }
+                .buttonStyle(.borderless).font(.system(size: 10))
+                .accessibilityLabel("\(symbol.code)\(estimateFees ? "校准含费总成本" : "返回买入金额")")
             }
-            .pickerStyle(.segmented).controlSize(.small)
-            .onChange(of: estimateFees) { _ in totalCost = ""; error = nil }
+            .frame(height: 20)
             HStack(spacing: 12) {
-                field(estimateFees ? "成交金额 · 元" : "总成本 · 含费/元", placeholder: "未设置", text: $totalCost,
+                field(estimateFees ? "买入金额 · 不含费/元" : "总成本 · 已含费/元", placeholder: "未设置", text: $totalCost,
                       label: estimateFees ? "买入成交金额" : "持仓总成本")
                     .focused($totalCostFocused)
                     .help(estimateFees ? "输入单笔买入委托的成交金额，不含手续费；费用自动预估"
@@ -68,7 +79,7 @@ struct TrackingEditor: View {
                     .frame(maxWidth: .infinity, alignment: .leading).frame(height: 20)
             }
             HStack {
-                Button("保存", action: saveValues)
+                Button(estimateFees ? "保存" : "保存总成本", action: saveValues)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityLabel("保存\(symbol.code)持仓和提醒")
@@ -81,10 +92,7 @@ struct TrackingEditor: View {
                 Text("留空关闭对应项目").font(.system(size: 9)).foregroundStyle(.secondary)
             }
             .controlSize(.small)
-            Text(error ?? notificationNotice ?? (configuration.hasPosition && configuration.totalCostYuan == nil
-                 ? "原总成本为估算，请核对；切换金额口径后需重新填写。"
-                 : estimateFees ? "按单笔委托预估，费率可修改并记住；实际扣费以交割单为准。"
-                 : "总成本含费用，单股成本自动计算；切换口径后需重新填写。"))
+            Text(error ?? notificationNotice ?? entryNotice)
                 .font(.system(size: 10))
                 .foregroundStyle(error != nil || notificationNotice != nil ? Color.orange : Color.secondary)
                 .lineLimit(2)
@@ -111,5 +119,17 @@ struct TrackingEditor: View {
 
     private var feeEstimate: BuyFeeEstimate? {
         try? BuyFeeEstimate.calculate(amount: totalCost, commissionRate: commissionRate, symbol: symbol)
+    }
+
+    private var entryNotice: String {
+        if !estimateFees { return "仅填写已含手续费的总成本；保存后不额外加费。" }
+        if let feeEstimate {
+            return "含费成本\(feeEstimate.totalCostText)元；按单笔预估，实际以交割单为准。"
+        }
+        if configuration.hasPosition && configuration.purchaseAmountYuan == nil {
+            let costLabel = configuration.totalCostYuan == nil ? "原总成本估算" : "已保存总成本"
+            return "\(costLabel)\(configuration.totalCostText)元；修改持仓请填买入金额，仅改提醒可直接保存。"
+        }
+        return "输入不含手续费的买入金额；程序自动加上买入费用。"
     }
 }

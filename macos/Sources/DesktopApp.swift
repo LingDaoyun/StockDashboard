@@ -97,7 +97,17 @@ final class QuoteStore: ObservableObject {
 
     func savePosition(for symbol: StockSymbol, amount: String, quantity: String, upper: String, lower: String,
                       estimateFees: Bool, commissionRate: String, now: Date = Date()) throws {
-        if estimateFees && !amount.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let amountText = amount.trimmingCharacters(in: .whitespacesAndNewlines)
+        if estimateFees, amountText.isEmpty,
+           let existing = tracking[symbol.id], existing.hasPosition, existing.purchaseAmountYuan == nil,
+           let existingQuantity = existing.quantity,
+           quantity.trimmingCharacters(in: .whitespacesAndNewlines) == String(existingQuantity) {
+            try saveTracking(for: symbol, cost: existing.costPrice.map { String($0) } ?? "",
+                             quantity: quantity, upper: upper, lower: lower,
+                             totalCost: existing.totalCostYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "", now: now)
+            return
+        }
+        if estimateFees && !amountText.isEmpty {
             let estimate = try BuyFeeEstimate.calculate(amount: amount, commissionRate: commissionRate, symbol: symbol)
             let previousRate = (tracking[symbol.id] ?? invalidTracking[symbol.id])?.purchaseCommissionRate
             try saveTracking(for: symbol, cost: "", quantity: quantity, upper: upper, lower: lower,
