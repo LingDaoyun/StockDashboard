@@ -409,6 +409,7 @@ struct WidgetView: View {
     let transparency: () -> Void
     let add: () -> Void
     let pin: () -> Void
+    let autoHide: () -> Void
     let hide: () -> Void
     let configure: (StockSymbol) -> Void
     @State private var newCode = ""
@@ -469,7 +470,9 @@ struct WidgetView: View {
                     if store.isAddingStock { store.isAddingStock = false }
                     else { add() }
                 }
-                toolButton("pin", help: store.isPinned ? "取消置顶" : "置顶", selected: store.isPinned, action: pin)
+                toolButton(store.isPinned ? "pin.fill" : "pin", help: store.isPinned ? "取消置顶" : "置顶", selected: store.isPinned, action: pin)
+                toolButton("sidebar.right", help: store.autoHideEnabled ? "关闭右侧吸附隐藏" : "开启右侧吸附隐藏",
+                           selected: store.autoHideEnabled, action: autoHide)
                 if store.isAdjustingTransparency {
                     HStack(spacing: 6) {
                         Slider(value: $store.backgroundTransparency, in: 0...1)
@@ -576,7 +579,7 @@ struct WidgetView: View {
     private func toolButton(_ symbol: String, help: String, selected: Bool = false,
                             action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: selected ? "pin.fill" : symbol)
+            Image(systemName: symbol)
                 .font(.system(size: 12))
                 .foregroundStyle(selected ? Color.accentColor : Color.secondary)
                 .frame(width: 24, height: 24)
@@ -746,6 +749,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
                                                                transparency: { [weak self] in self?.toggleTransparency() },
                                                                add: { [weak self] in self?.addStock() },
                                                                pin: { [weak self] in self?.togglePin() },
+                                                               autoHide: { [weak self] in self?.toggleAutoHide() },
                                                                hide: { [weak self] in self?.hidePanel() },
                                                                configure: { [weak self] symbol in self?.toggleTracking(symbol) }))
         host.translatesAutoresizingMaskIntoConstraints = false
