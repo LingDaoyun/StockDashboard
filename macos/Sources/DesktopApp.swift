@@ -452,12 +452,17 @@ struct WidgetView: View {
                         }
                         .frame(maxWidth: .infinity)
                 } else if !store.isAdjustingTransparency {
-                    Image(systemName: "chart.xyaxis.line")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                    Text(store.isPreview ? "A股行情 · 测试预览" : "A股桌面行情")
-                        .font(.system(size: 13, weight: .semibold))
-                    Spacer()
+                    HStack(spacing: 8) {
+                        Image(systemName: "chart.xyaxis.line")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                        Text(store.isPreview ? "A股行情 · 测试预览" : "A股桌面行情")
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 48)
+                    .overlay(WindowDraggingArea())
                 }
                 toolButton(store.isAddingStock ? "xmark" : "plus",
                            help: store.isAddingStock ? "收起输入框" : "追加股票") {

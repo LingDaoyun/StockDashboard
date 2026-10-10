@@ -66,6 +66,7 @@ final class EdgeDockController {
     private var expanded: NSRect?
     private var presentation = Presentation.shown
     private var timer: Timer?
+    private var hoverTimer: Timer?
     private var changingFrame = false
     private var animating = false
     private var animationGeneration = 0
@@ -89,7 +90,7 @@ final class EdgeDockController {
         handlePanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         handlePanel.contentView = handleView
         surface.onEnter = { [weak self] in
-            guard let self, self.edge != nil else { return }
+            guard let self, self.presentation == .shown, self.edge != nil else { return }
             self.cancelTimer()
         }
         surface.onExit = { [weak self] in self?.scheduleCollapse() }
@@ -97,15 +98,16 @@ final class EdgeDockController {
         handleView.onExit = { [weak self] in self?.scheduleCollapse() }
     }
 
-    func restore() { scheduleDock() }
+    func restore() { startPointerMonitoring(); scheduleDock() }
 
     func setEnabled(_ value: Bool) {
         guard enabled != value else { return }
         enabled = value
         cancelTimer()
         cancelAnimation()
-        if value { scheduleDock() }
+        if value { startPointerMonitoring(); scheduleDock() }
         else {
+            stopPointerMonitoring()
             let reference = expanded ?? panel.frame
             let frame = EdgeGeometry.clamp(reference, in: visibleFrame(for: reference))
             edge = nil
@@ -155,6 +157,7 @@ final class EdgeDockController {
         cancelTimer()
         let wasCollapsed = presentation == .collapsed
         presentation = .shown
+        startPointerMonitoring()
         let visible = visibleFrame(for: expanded ?? panel.frame)
         var target = EdgeGeometry.clamp(expanded ?? panel.frame, in: visible)
         if enabled {
@@ -181,11 +184,35 @@ final class EdgeDockController {
         cancelTimer()
         cancelAnimation()
         presentation = .manuallyHidden
+        stopPointerMonitoring()
         panel.orderOut(nil)
         handlePanel.orderOut(nil)
     }
 
-    func stop() { cancelTimer(); cancelAnimation(); handlePanel.orderOut(nil) }
+    func stop() { cancelTimer(); stopPointerMonitoring(); cancelAnimation(); handlePanel.orderOut(nil) }
+
+    private func startPointerMonitoring() {
+        guard enabled, presentation != .manuallyHidden, hoverTimer == nil else { return }
+        // Window animation and order changes can skip tracking-area enter/exit events.
+        let monitor = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkPointer() }
+        }
+        hoverTimer = monitor
+        RunLoop.main.add(monitor, forMode: .common)
+    }
+
+    private func stopPointerMonitoring() { hoverTimer?.invalidate(); hoverTimer = nil }
+
+    private func checkPointer() {
+        guard enabled, edge != nil, !animating, presentation != .manuallyHidden else { return }
+        if presentation == .collapsed {
+            if handlePanel.isVisible, handlePanel.frame.contains(NSEvent.mouseLocation) { reveal() }
+        } else if pointerInside() {
+            cancelTimer()
+        } else if timer?.isValid != true {
+            scheduleCollapse()
+        }
+    }
 
     private func scheduleDock() {
         guard enabled, presentation == .shown else { return }
