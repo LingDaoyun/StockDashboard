@@ -256,6 +256,93 @@ struct WatchlistTests {
                 "异常旧配置不能借空成交金额保存进入保留持仓分支")
         check(invalidAlertStore.tracking[primary.id] == nil && invalidAlertStore.invalidTracking[primary.id] == malformed,
               "异常配置需要明确修正，原数据仍保留")
+        let undecodableRecord: [String: Any] = ["costPrice": 10, "quantity": "broken", "totalCostYuan": NSDecimalNumber(string: "5062.08"), "upperPrice": 11,
+                                              "upperTriggered": true, "lowerTriggered": false, "armedAt": 100]
+        let validRecord = try JSONSerialization.jsonObject(with: JSONEncoder().encode(valid))
+        let partiallyDamagedData = try JSONSerialization.data(withJSONObject: [primary.id: undecodableRecord, secondary.id: validRecord])
+        defaults.set("600108,002580", forKey: "symbols")
+        defaults.set(partiallyDamagedData, forKey: "stockTracking")
+        let partiallyDamagedStore = QuoteStore(defaults: defaults, preview: nil)
+        partiallyDamagedStore.suspend()
+        check(partiallyDamagedStore.tracking[secondary.id] == valid, "单条类型损坏不能丢弃其他合法持仓及已提醒状态")
+        check(partiallyDamagedStore.tracking[primary.id] == nil && partiallyDamagedStore.invalidTracking[primary.id] == nil,
+              "不能解码的原始条目不能用于盈亏或提醒")
+        check(partiallyDamagedStore.trackingStorageNotice != nil, "单条无法解码时提供持续的配置提示")
+        var damagedAlerts = 0
+        partiallyDamagedStore.onPriceAlert = { _ in damagedAlerts += 1 }
+        partiallyDamagedStore.evaluateAlerts([primary.id: marketQuote(primary, 12, 1100)], now: Date(timeIntervalSince1970: 1100))
+        check(damagedAlerts == 0, "不能解码的配置不能消耗提醒机会")
+        try partiallyDamagedStore.saveTracking(for: secondary, cost: "20.5", quantity: "200", upper: "21", lower: "")
+        try partiallyDamagedStore.addSymbols("600519")
+        let partiallySaved = try JSONSerialization.jsonObject(with: defaults.data(forKey: "stockTracking")!) as! [String: Any]
+        check((partiallySaved[primary.id] as? NSDictionary)?.isEqual(to: undecodableRecord) == true,
+              "保存另一只及增加股票必须保留无法解码条目的原始字段")
+        let partiallyReloaded = QuoteStore(defaults: defaults, preview: nil)
+        partiallyReloaded.suspend()
+        check(partiallyReloaded.tracking[secondary.id]?.costPrice == 20.5 && partiallyReloaded.tracking[secondary.id]?.upperTriggered == true,
+              "损坏条目并存时正常保存可重启恢复且不重置未改阈值")
+        try partiallyReloaded.saveTracking(for: primary, cost: "10", quantity: "100", upper: "12", lower: "9")
+        let correctedRecords = try JSONDecoder().decode([String: StockTracking].self, from: defaults.data(forKey: "stockTracking")!)
+        check(correctedRecords[primary.id]?.quantity == 100 && correctedRecords[secondary.id]?.costPrice == 20.5,
+              "主动修正对应股票替换原始坏条目且保留其他配置")
+        check(partiallyReloaded.trackingStorageNotice == nil, "主动修正最后一个坏条目后清理配置提示")
+        defaults.set(partiallyDamagedData, forKey: "stockTracking")
+        let rawRemovalStore = QuoteStore(defaults: defaults, preview: nil)
+        rawRemovalStore.suspend()
+        rawRemovalStore.removeSymbol(primary)
+        let remainingRecords = try JSONDecoder().decode([String: StockTracking].self, from: defaults.data(forKey: "stockTracking")!)
+        check(remainingRecords[primary.id] == nil && remainingRecords[secondary.id] == valid,
+              "主动删除对应股票清理原始坏条目，不影响其他持仓")
+        check(rawRemovalStore.trackingStorageNotice == nil, "主动删除最后一个坏条目后清理配置提示")
+        for brokenData in [Data("not JSON".utf8), Data("[]".utf8), Data("null".utf8)] {
+            defaults.set("600108,002580", forKey: "symbols")
+            defaults.set(brokenData, forKey: "stockTracking")
+            let brokenStore = QuoteStore(defaults: defaults, preview: nil)
+            brokenStore.suspend()
+            check(defaults.data(forKey: "stockTrackingCorruptBackup") == brokenData,
+                  "整个配置不是JSON字典时必须备份原始字节")
+            check(brokenStore.tracking.isEmpty && brokenStore.invalidTracking.isEmpty,
+                  "整个存储损坏时不能恢复任何持仓或提醒")
+            check(brokenStore.trackingStorageNotice != nil, "整个配置损坏和备份结果必须提供可见提示")
+            try brokenStore.saveTracking(for: secondary, cost: "20", quantity: "200", upper: "21", lower: "")
+            check(defaults.data(forKey: "stockTrackingCorruptBackup") == brokenData,
+                  "重新录入合法配置不能覆盖损坏原始备份")
+            let recoveredStore = QuoteStore(defaults: defaults, preview: nil)
+            recoveredStore.suspend()
+            check(recoveredStore.tracking[secondary.id]?.quantity == 200,
+                  "备份后主动重新录入的配置可正常恢复")
+            check(defaults.data(forKey: "stockTrackingCorruptBackup") == brokenData,
+                  "正常重启不能改动原始备份")
+        }
+        for extreme in ["1e300", "1e-300"] {
+            var wideRecord = try StockTracking.parse(cost: extreme, quantity: "1", upper: extreme, lower: "")
+            wideRecord.upperTriggered = true
+            wideRecord.armedAt = Date(timeIntervalSince1970: 100)
+            let preciseRecord = StockTracking(quantity: 500, upperPrice: 13, upperTriggered: true,
+                                               armedAt: Date(timeIntervalSince1970: 100), totalCostYuan: Decimal(string: "5062.08"))
+            defaults.set("600108,002580", forKey: "symbols")
+            defaults.set(try JSONEncoder().encode([primary.id: wideRecord, secondary.id: preciseRecord]), forKey: "stockTracking")
+            let wideStore = QuoteStore(defaults: defaults, preview: nil)
+            wideStore.suspend()
+            check(wideStore.tracking[primary.id] == wideRecord && wideStore.trackingStorageNotice == nil,
+                  "超出Decimal范围的有限Double旧成本与提醒仍可恢复")
+            check(wideStore.tracking[secondary.id]?.totalCostYuan == Decimal(string: "5062.08")
+                  && wideStore.tracking[secondary.id]?.profit(at: 12)?.amountText == "+937.92",
+                  "有限Double旧记录不能影响其他持仓的Decimal精度")
+            try wideStore.saveTracking(for: secondary, cost: "", quantity: "500", upper: "13", lower: "", totalCost: "5063.10")
+            let savedWideRecords = try JSONDecoder().decode([String: StockTracking].self, from: defaults.data(forKey: "stockTracking")!)
+            check(savedWideRecords[primary.id] == wideRecord && savedWideRecords[secondary.id]?.totalCostYuan == Decimal(string: "5063.10"),
+                  "保存精确成本仍保留超Decimal范围的另一只股票字段")
+            try wideStore.saveTracking(for: primary, cost: extreme, quantity: "2", upper: extreme, lower: "")
+            let wideReloaded = QuoteStore(defaults: defaults, preview: nil)
+            wideReloaded.suspend()
+            check(wideReloaded.tracking[primary.id]?.quantity == 2 && wideReloaded.tracking[primary.id]?.upperPrice == Double(extreme),
+                  "有限Double新保存必须真正落盘并在重启后恢复")
+            check(wideReloaded.tracking[primary.id]?.upperTriggered == true
+                  && wideReloaded.tracking[primary.id]?.armedAt == wideRecord.armedAt,
+                  "仅修改持仓不能重置超Decimal范围的旧提醒状态")
+        }
         print("PASS: \(count) watchlist assertions")
+        print("PASS: \(try runTotalProfitTests()) total-profit assertions")
     }
 }

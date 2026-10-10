@@ -21,6 +21,7 @@ final class QuoteStore: ObservableObject {
     @Published private(set) var invalidTracking: [String: StockTracking] = [:]
     @Published private(set) var priceAlerts: [String: String] = [:]
     @Published private(set) var buyCommissionRate: String
+    @Published private(set) var trackingStorageNotice: String?
     @Published var notificationNotice: String?
     var onPriceAlert: ((PriceAlert) -> Void)?
     var onAlertSetup: (() -> Void)?
@@ -41,6 +42,38 @@ final class QuoteStore: ObservableObject {
     private var activity: NSObjectProtocol?
     private var suspended = false
     private let client = QuoteClient()
+    private var undecodableTracking: [String: TrackingJSONValue] = [:]
+    private var backedUpCorruptTracking = false
+
+    // Keep rejected JSON fields without routing precise costs through Double.
+    private indirect enum TrackingJSONValue: Codable {
+        case null, bool(Bool), number(Decimal), double(Double), string(String)
+        case array([TrackingJSONValue]), object([String: TrackingJSONValue])
+
+        init(from decoder: Decoder) throws {
+            let value = try decoder.singleValueContainer()
+            if value.decodeNil() { self = .null }
+            else if let flag = try? value.decode(Bool.self) { self = .bool(flag) }
+            else if let text = try? value.decode(String.self) { self = .string(text) }
+            else if let number = try? value.decode(Decimal.self) { self = .number(number) }
+            else if let number = try? value.decode(Double.self), number.isFinite { self = .double(number) }
+            else if let array = try? value.decode([TrackingJSONValue].self) { self = .array(array) }
+            else { self = .object(try value.decode([String: TrackingJSONValue].self)) }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var value = encoder.singleValueContainer()
+            switch self {
+            case .null: try value.encodeNil()
+            case .bool(let flag): try value.encode(flag)
+            case .number(let number): try value.encode(number)
+            case .double(let number): try value.encode(number)
+            case .string(let text): try value.encode(text)
+            case .array(let array): try value.encode(array)
+            case .object(let object): try value.encode(object)
+            }
+        }
+    }
 
     init(defaults: UserDefaults, preview: String?) {
         self.defaults = defaults
@@ -51,17 +84,46 @@ final class QuoteStore: ObservableObject {
         self.buyCommissionRate = defaults.string(forKey: "buyCommissionRate") ?? "2.5"
         self.autoHideEnabled = defaults.object(forKey: "autoHideEnabled") as? Bool ?? true
         self.backgroundTransparency = min(1, max(0, defaults.object(forKey: "backgroundTransparency") as? Double ?? 0.3))
-        if let data = defaults.data(forKey: "stockTracking"),
-           let savedTracking = try? JSONDecoder().decode([String: StockTracking].self, from: data) {
-            let ids = Set(symbols.map(\.id))
-            for (id, value) in savedTracking where ids.contains(id) {
-                if let validated = try? value.validated() { tracking[id] = validated }
-                else { invalidTracking[id] = value }
+        if let data = defaults.data(forKey: "stockTracking") {
+            if let savedTracking = try? JSONDecoder().decode([String: TrackingJSONValue].self, from: data) {
+                let ids = Set(symbols.map(\.id))
+                for (id, rawValue) in savedTracking where ids.contains(id) {
+                    guard let rawData = try? JSONEncoder().encode(rawValue),
+                          let value = try? JSONDecoder().decode(StockTracking.self, from: rawData) else {
+                        undecodableTracking[id] = rawValue
+                        continue
+                    }
+                    if let validated = try? value.validated() { tracking[id] = validated }
+                    else { invalidTracking[id] = value }
+                }
+                if !undecodableTracking.isEmpty {
+                    trackingStorageNotice = "部分持仓配置无法读取，原数据已保留；请重新保存对应股票。"
+                }
+            } else {
+                defaults.set(data, forKey: "stockTrackingCorruptBackup")
+                backedUpCorruptTracking = true
+                trackingStorageNotice = "持仓配置无法读取，原数据已本地备份；请核对并重新录入。"
             }
         }
     }
 
     var codeText: String { symbols.map(\.id).joined(separator: ", ") }
+
+    var totalPositionProfit: Decimal? {
+        guard trackingStorageNotice == nil, !invalidTracking.values.contains(where: {
+            $0.costPrice != nil || $0.totalCostYuan != nil || $0.quantity != nil
+                || $0.purchaseAmountYuan != nil || $0.purchaseCommissionRate != nil
+        }) else { return nil }
+        var total = Decimal.zero
+        for symbol in symbols {
+            guard let position = tracking[symbol.id], position.hasPosition else { continue }
+            guard let quote = quotes[symbol.id], var amount = position.profit(at: quote.price)?.amount else { return nil }
+            var sum = Decimal()
+            guard NSDecimalAdd(&sum, &total, &amount, .plain) == .noError else { return nil }
+            total = sum
+        }
+        return total
+    }
 
     var listHeight: CGFloat {
         if symbols.isEmpty { return 198 }
@@ -90,6 +152,7 @@ final class QuoteStore: ObservableObject {
         value.armedAt = value.hasAlerts ? (changedPrices ? now : previous?.armedAt ?? now) : nil
         tracking[symbol.id] = value.hasPosition || value.hasAlerts ? value : nil
         invalidTracking[symbol.id] = nil
+        undecodableTracking[symbol.id] = nil
         if changedPrices { priceAlerts[symbol.id] = nil }
         persistTracking()
         if value.hasAlerts { onAlertSetup?() }
@@ -154,7 +217,14 @@ final class QuoteStore: ObservableObject {
     private func persistTracking() {
         // Preserve rejected entries for correction instead of deleting their saved fields.
         let values = invalidTracking.merging(tracking) { _, valid in valid }
-        if let data = try? JSONEncoder().encode(values) { defaults.set(data, forKey: "stockTracking") }
+        if let encoded = try? JSONEncoder().encode(values),
+           let records = try? JSONDecoder().decode([String: TrackingJSONValue].self, from: encoded),
+           let data = try? JSONEncoder().encode(undecodableTracking.merging(records) { _, valid in valid }) {
+            defaults.set(data, forKey: "stockTracking")
+        }
+        trackingStorageNotice = !undecodableTracking.isEmpty
+            ? "部分持仓配置无法读取，原数据已保留；请重新保存对应股票。"
+            : backedUpCorruptTracking ? "持仓配置无法读取，原数据已本地备份；请核对并重新录入。" : nil
     }
 
     func start() {
@@ -194,6 +264,7 @@ final class QuoteStore: ObservableObject {
         quotes = quotes.filter { ids.contains($0.key) }
         tracking = tracking.filter { ids.contains($0.key) }
         invalidTracking = invalidTracking.filter { ids.contains($0.key) }
+        undecodableTracking = undecodableTracking.filter { ids.contains($0.key) }
         priceAlerts = priceAlerts.filter { ids.contains($0.key) }
         if let expandedSymbolID, !ids.contains(expandedSymbolID) { self.expandedSymbolID = nil }
         persistTracking()
@@ -484,6 +555,7 @@ struct WidgetView: View {
 
     private var status: String {
         if let additionError { return additionError }
+        if let notice = store.trackingStorageNotice { return notice }
         if store.symbols.isEmpty { return "添加股票后，每3秒自动刷新" }
         let quoteTime = store.quotes.values.map(\.timestamp).min()
         if store.errorMessage != nil {
@@ -606,11 +678,19 @@ struct WidgetView: View {
             Divider().opacity(0.6)
             HStack(spacing: 6) {
                 Circle()
-                    .fill(additionError != nil || store.errorMessage != nil || !store.unavailable.isEmpty || !store.invalidTracking.isEmpty ? Color.orange
+                    .fill(additionError != nil || store.errorMessage != nil || !store.unavailable.isEmpty || !store.invalidTracking.isEmpty || store.trackingStorageNotice != nil ? Color.orange
                           : store.lastReceipt != nil ? Color.green : Color.secondary)
                     .frame(width: 5, height: 5)
                 Text(status).lineLimit(1)
                 Spacer(minLength: 0)
+                let total = store.totalPositionProfit
+                Text("总盈亏 \(total.map { yuanText($0, showSign: $0 != 0) } ?? "—")")
+                    .monospacedDigit()
+                    .foregroundStyle(total.map { $0 > 0 ? Color.red : $0 < 0 ? Color.green : Color.secondary } ?? Color.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .layoutPriority(1)
+                    .help("单位：元。合计已填写持仓的股票，按各卡片最新可用报价计算；无持仓不计入。缺少持仓报价或配置异常时显示—，总成本已含费用，不重复扣费。")
                 Button(action: { store.refresh() }) {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -622,7 +702,7 @@ struct WidgetView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 16)
             .frame(height: 31)
-            .help(additionError ?? store.errorMessage ?? "腾讯公开行情 · 成交量与成交额为当日累计；底部行情时间取列表最早一条，北京时间。最近接收：\(store.lastReceipt.map { DisplayFormat.chinaTime.string(from: $0) } ?? "—")")
+            .help(additionError ?? store.trackingStorageNotice ?? store.errorMessage ?? "腾讯公开行情 · 成交量与成交额为当日累计；底部行情时间取列表最早一条，北京时间。最近接收：\(store.lastReceipt.map { DisplayFormat.chinaTime.string(from: $0) } ?? "—")")
         }
         .background(Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))

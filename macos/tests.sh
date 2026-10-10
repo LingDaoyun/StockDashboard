@@ -13,5 +13,6 @@ xcrun swiftc -swift-version 6 Sources/EdgeGeometry.swift Tests/EdgeGeometryTests
 "$test_dir/edge-geometry-tests"
 xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 Sources/EdgeGeometry.swift Sources/EdgeDocking.swift Tests/EdgeDockingTests.swift -o "$test_dir/edge-docking-tests"
 "$test_dir/edge-docking-tests"
-xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 Sources/Quotes.swift Sources/Tracking.swift Sources/Fees.swift Sources/TrackingViews.swift Sources/EdgeGeometry.swift Sources/EdgeDocking.swift Sources/WindowDragging.swift Sources/DesktopApp.swift Tests/WatchlistTests.swift -o "$test_dir/watchlist-tests"
+xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 Sources/Quotes.swift Sources/Tracking.swift Sources/Fees.swift Sources/TrackingViews.swift Sources/EdgeGeometry.swift Sources/EdgeDocking.swift Sources/WindowDragging.swift Sources/DesktopApp.swift Tests/WatchlistTests.swift Tests/TotalProfitTests.swift -o "$test_dir/watchlist-tests"
 "$test_dir/watchlist-tests"
+./Tests/BuildSafetyTests.sh

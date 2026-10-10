@@ -189,7 +189,7 @@ struct PositionProfit {
     var amountText: String { yuanText(amount, showSign: true) }
 }
 
-private func yuanText(_ value: Decimal, showSign: Bool) -> String {
+func yuanText(_ value: Decimal, showSign: Bool) -> String {
     var value = value
     var rounded = Decimal()
     NSDecimalRound(&rounded, &value, 2, .plain)
