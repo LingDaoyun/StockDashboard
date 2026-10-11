@@ -41,7 +41,7 @@ final class QuoteStore: ObservableObject {
     private var request: Task<Void, Never>?
     private var activity: NSObjectProtocol?
     private var suspended = false
-    private let client = QuoteClient()
+    private let client: QuoteClient
     private var undecodableTracking: [String: TrackingJSONValue] = [:]
     private var backedUpCorruptTracking = false
 
@@ -75,7 +75,8 @@ final class QuoteStore: ObservableObject {
         }
     }
 
-    init(defaults: UserDefaults, preview: String?) {
+    init(defaults: UserDefaults, preview: String?, client: QuoteClient = QuoteClient()) {
+        self.client = client
         self.defaults = defaults
         self.isPreview = preview != nil
         let saved = preview ?? defaults.string(forKey: "symbols") ?? ""
@@ -228,7 +229,7 @@ final class QuoteStore: ObservableObject {
     }
 
     func start() {
-        let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
         timer.tolerance = 0.1
@@ -304,7 +305,7 @@ final class QuoteStore: ObservableObject {
         if !symbols.isEmpty && !suspended {
             activity = ProcessInfo.processInfo.beginActivity(
                 options: .userInitiatedAllowingIdleSystemSleep,
-                reason: "用户指定的桌面行情每3秒刷新"
+                reason: "用户指定的桌面行情每1秒刷新"
             )
         }
     }
@@ -556,7 +557,7 @@ struct WidgetView: View {
     private var status: String {
         if let additionError { return additionError }
         if let notice = store.trackingStorageNotice { return notice }
-        if store.symbols.isEmpty { return "添加股票后，每3秒自动刷新" }
+        if store.symbols.isEmpty { return "添加股票后，每1秒自动刷新" }
         let quoteTime = store.quotes.values.map(\.timestamp).min()
         if store.errorMessage != nil {
             return quoteTime.map { "连接失败 · 上次行情 \(DisplayFormat.chinaTime.string(from: $0))" }
@@ -565,10 +566,10 @@ struct WidgetView: View {
         if !store.unavailable.isEmpty { return "部分股票无可用行情 · 自动刷新" }
         if !store.invalidTracking.isEmpty { return "持仓或提醒配置异常 · 点击股票名称修正" }
         if let quoteTime {
-            return "行情 \(DisplayFormat.chinaTime.string(from: quoteTime)) · 3秒刷新"
+            return "行情 \(DisplayFormat.chinaTime.string(from: quoteTime)) · 1秒刷新"
         }
         if let date = store.lastReceipt {
-            return "请求成功 \(DisplayFormat.receiptTime.string(from: date)) · 3秒刷新"
+            return "请求成功 \(DisplayFormat.receiptTime.string(from: date)) · 1秒刷新"
         }
         return "正在连接行情源…"
     }

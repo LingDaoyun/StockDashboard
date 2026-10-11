@@ -99,18 +99,24 @@ enum QuoteParser {
     }
 }
 
-struct QuoteClient {
-    func fetch(_ symbols: [StockSymbol]) async throws -> [String: Quote] {
-        guard !symbols.isEmpty else { return [:] }
-        let normalized = try StockSymbol.parseList(symbols.map(\.id).joined(separator: ","))
-        let url = URL(string: "https://qt.gtimg.cn/q=" + normalized.map(\.id).joined(separator: ","))!
+final class QuoteClient: Sendable {
+    private let session: URLSession
+
+    init(makeSession: (URLSessionConfiguration) -> URLSession = { URLSession(configuration: $0) }) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 6
         configuration.timeoutIntervalForResource = 6
-        let session = URLSession(configuration: configuration)
-        defer { session.finishTasksAndInvalidate() }
+        session = makeSession(configuration)
+    }
+
+    deinit { session.invalidateAndCancel() }
+
+    func fetch(_ symbols: [StockSymbol]) async throws -> [String: Quote] {
+        guard !symbols.isEmpty else { return [:] }
+        let normalized = try StockSymbol.parseList(symbols.map(\.id).joined(separator: ","))
+        let url = URL(string: "https://qt.gtimg.cn/q=" + normalized.map(\.id).joined(separator: ","))!
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 6)
         request.httpMethod = "GET"
         let data: Data
