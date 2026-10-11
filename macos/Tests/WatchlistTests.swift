@@ -198,6 +198,46 @@ struct WatchlistTests {
                                           commissionRate: NSDecimalNumber(decimal: historicalPosition.purchaseCommissionRate!).stringValue)
         check(historicalStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40007.60"), "重开旧持仓使用该笔费率，仅编辑提醒不重算为全局新费率")
         check(historicalStore.buyCommissionRate == "3", "重存旧持仓未修改费率时不把全局新费率改回旧值")
+        let legacyFeeDomain = "cn.local.AShareDesktop.legacy-fee-tests.\(UUID().uuidString)"
+        let legacyFeeDefaults = UserDefaults(suiteName: legacyFeeDomain)!
+        defer { legacyFeeDefaults.removePersistentDomain(forName: legacyFeeDomain) }
+        legacyFeeDefaults.set("600108", forKey: "symbols")
+        legacyFeeDefaults.set("3", forKey: "buyCommissionRate")
+        let legacyFeeData = Data(#"{"sh600108":{"quantity":4000,"totalCostYuan":40010.40,"purchaseAmountYuan":40000,"upperPrice":50,"upperTriggered":false,"lowerTriggered":false}}"#.utf8)
+        legacyFeeDefaults.set(legacyFeeData, forKey: "stockTracking")
+        let legacyFeeStore = QuoteStore(defaults: legacyFeeDefaults, preview: nil)
+        legacyFeeStore.suspend()
+        try legacyFeeStore.savePosition(for: primary, amount: "40000", quantity: "4000", upper: "51", lower: "",
+                                        estimateFees: true, commissionRate: "3")
+        check(legacyFeeStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40010.40"),
+              "旧预估持仓没有费率时，仅改提醒不能按当前全局费率改写成本")
+        check(legacyFeeStore.tracking[primary.id]?.purchaseAmountYuan == 40000
+              && legacyFeeStore.tracking[primary.id]?.purchaseCommissionRate == nil,
+              "仅改提醒保留原成交额和未知费率，不冒充实际成本或推算历史费率")
+        check(legacyFeeStore.tracking[primary.id]?.upperPrice == 51 && legacyFeeStore.buyCommissionRate == "3",
+              "旧预估持仓仍正常保存新提醒且不修改全局费率")
+        let legacyFeeReloaded = QuoteStore(defaults: legacyFeeDefaults, preview: nil)
+        legacyFeeReloaded.suspend()
+        check(legacyFeeReloaded.tracking[primary.id] == legacyFeeStore.tracking[primary.id]
+              && legacyFeeReloaded.tracking[primary.id]?.profit(at: 10)?.amountText == "-10.40",
+              "旧预估持仓修改提醒重启后成本与盈亏仍准确")
+        try legacyFeeStore.savePosition(for: primary, amount: "40000", quantity: "4000", upper: "51", lower: "",
+                                        estimateFees: true, commissionRate: "4")
+        check(legacyFeeStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40016.40")
+              && legacyFeeStore.tracking[primary.id]?.purchaseCommissionRate == 4,
+              "旧预估持仓明确修改佣金率时仍重新估费并保存费率")
+        try legacyFeeStore.savePosition(for: primary, amount: "41000", quantity: "4001", upper: "51", lower: "",
+                                        estimateFees: true, commissionRate: "4")
+        check(legacyFeeStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "41016.81")
+              && legacyFeeStore.tracking[primary.id]?.purchaseAmountYuan == 41000
+              && legacyFeeStore.tracking[primary.id]?.quantity == 4001,
+              "修改买入金额或股数仍走持仓保存，不被提醒保留分支忽略")
+        try legacyFeeStore.savePosition(for: primary, amount: "41016.80", quantity: "4001", upper: "51", lower: "",
+                                        estimateFees: false, commissionRate: "4")
+        check(legacyFeeStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "41016.80")
+              && legacyFeeStore.tracking[primary.id]?.purchaseAmountYuan == nil
+              && legacyFeeStore.tracking[primary.id]?.purchaseCommissionRate == nil,
+              "明确校准含费成本仍保存实际金额并清除预估来源")
         try exactStore.savePosition(for: primary, amount: "40007.59", quantity: "4000", upper: "13", lower: "",
                                     estimateFees: false, commissionRate: "abc")
         check(exactStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40007.59") && exactStore.tracking[primary.id]?.purchaseAmountYuan == nil, "实际含费总成本不再扣费，也不再标记预估")

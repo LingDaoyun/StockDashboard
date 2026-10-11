@@ -32,12 +32,18 @@ if [[ ! -d "$installed_app" ]] || ! /usr/bin/diff -qr "$source_app" "$installed_
     staging_dir="$(mktemp -d "$apps_dir/.AShareDesktop-install.XXXXXX")"
     trap 'rm -rf "$staging_dir"' EXIT
     /usr/bin/ditto "$source_app" "$staging_dir/A股桌面行情.app"
+    backup_dir=""
     if [[ -e "$installed_app" ]]; then
         backup_dir="$(mktemp -d "$apps_dir/.AShareDesktop-backup.XXXXXX")"
         mv "$installed_app" "$backup_dir/A股桌面行情.app"
         print "旧版本备份：$backup_dir/A股桌面行情.app"
     fi
-    mv "$staging_dir/A股桌面行情.app" "$installed_app"
+    if ! mv "$staging_dir/A股桌面行情.app" "$installed_app"; then
+        if [[ -n "$backup_dir" ]]; then
+            mv "$backup_dir/A股桌面行情.app" "$installed_app"
+        fi
+        exit 1
+    fi
 fi
 
 mkdir -p "$launch_dir"

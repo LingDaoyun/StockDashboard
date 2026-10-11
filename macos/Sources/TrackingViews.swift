@@ -123,6 +123,9 @@ struct TrackingEditor: View {
 
     private var entryNotice: String {
         if !estimateFees { return "仅填写已含手续费的总成本；保存后不额外加费。" }
+        if configuration.purchaseAmountYuan != nil && configuration.purchaseCommissionRate == nil {
+            return "旧费率未记录；仅改提醒保留原成本\(configuration.totalCostText)元，修改买入字段才按当前费率重算。"
+        }
         if let feeEstimate {
             return "含费成本\(feeEstimate.totalCostText)元；按单笔预估，实际以交割单为准。"
         }

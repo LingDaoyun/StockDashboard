@@ -162,13 +162,18 @@ final class QuoteStore: ObservableObject {
     func savePosition(for symbol: StockSymbol, amount: String, quantity: String, upper: String, lower: String,
                       estimateFees: Bool, commissionRate: String, now: Date = Date()) throws {
         let amountText = amount.trimmingCharacters(in: .whitespacesAndNewlines)
-        if estimateFees, amountText.isEmpty,
-           let existing = tracking[symbol.id], existing.hasPosition, existing.purchaseAmountYuan == nil,
+        // Unchanged purchase inputs mean an alert edit, including older estimates with no saved rate.
+        if estimateFees, let existing = tracking[symbol.id], existing.hasPosition,
            let existingQuantity = existing.quantity,
-           quantity.trimmingCharacters(in: .whitespacesAndNewlines) == String(existingQuantity) {
+           quantity.trimmingCharacters(in: .whitespacesAndNewlines) == String(existingQuantity),
+           amountText == (existing.purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""),
+           existing.purchaseAmountYuan == nil || commissionRate.trimmingCharacters(in: .whitespacesAndNewlines)
+               == (existing.purchaseCommissionRate.map { NSDecimalNumber(decimal: $0).stringValue } ?? buyCommissionRate) {
             try saveTracking(for: symbol, cost: existing.costPrice.map { String($0) } ?? "",
                              quantity: quantity, upper: upper, lower: lower,
-                             totalCost: existing.totalCostYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "", now: now)
+                             totalCost: existing.totalCostYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "",
+                             purchaseAmount: existing.purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "",
+                             purchaseCommissionRate: existing.purchaseCommissionRate, now: now)
             return
         }
         if estimateFees && !amountText.isEmpty {
