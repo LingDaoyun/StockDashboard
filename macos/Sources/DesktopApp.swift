@@ -117,6 +117,13 @@ final class QuoteStore: ObservableObject {
     var codeText: String { symbols.map(\.id).joined(separator: ", ") }
 
     var marketSession: MarketSession { MarketClock.session(at: marketNow) }
+    var isAuction: Bool { marketSession.phase == .auction }
+    func valuationPrice(for symbol: StockSymbol) -> Double? {
+        quotes[symbol.id]?.valuationPrice(isAuction: isAuction)
+    }
+    var missingAuctionPrice: Bool {
+        isAuction && symbols.contains { quotes[$0.id] != nil && valuationPrice(for: $0) == nil }
+    }
     var oldestQuoteTime: Date? { quotes.values.map(\.timestamp).min() }
     var hasStaleQuotes: Bool {
         oldestQuoteTime.map { MarketClock.isStale(timestamp: $0, at: marketNow, session: marketSession) } ?? false
@@ -130,7 +137,7 @@ final class QuoteStore: ObservableObject {
         var total = Decimal.zero
         for symbol in symbols {
             guard let position = tracking[symbol.id], position.hasPosition else { continue }
-            guard let quote = quotes[symbol.id], var amount = position.profit(at: quote.price)?.amount else { return nil }
+            guard let price = valuationPrice(for: symbol), var amount = position.profit(at: price)?.amount else { return nil }
             var sum = Decimal()
             guard NSDecimalAdd(&sum, &total, &amount, .plain) == .noError else { return nil }
             total = sum
@@ -217,9 +224,12 @@ final class QuoteStore: ObservableObject {
     }
 
     func evaluateAlerts(_ incoming: [String: Quote], now: Date) {
+        // Auction book updates can carry a fresh timestamp while the last trade is unchanged.
+        guard MarketClock.session(at: now).phase != .auction else { return }
         var changed = false
         for symbol in symbols {
             guard let quote = incoming[symbol.id], var value = tracking[symbol.id] else { continue }
+            guard MarketClock.session(at: quote.timestamp).phase != .auction else { continue }
             let alerts = value.takeAlerts(for: quote, now: now)
             guard !alerts.isEmpty else { continue }
             tracking[symbol.id] = value
@@ -431,6 +441,8 @@ enum DisplayFormat {
 struct QuoteRow: View {
     let symbol: StockSymbol
     let quote: Quote?
+    let valuationPrice: Double?
+    let isAuction: Bool
     let failed: Bool
     let unavailable: Bool
     let configuration: StockTracking
@@ -444,7 +456,17 @@ struct QuoteRow: View {
     let rearm: () -> Void
     let remove: () -> Void
 
-    private var profit: PositionProfit? { quote.flatMap { configuration.profit(at: $0.price) } }
+    private var profit: PositionProfit? { valuationPrice.flatMap { configuration.profit(at: $0) } }
+    private var priceChange: Double? {
+        guard let quote, let valuationPrice else { return nil }
+        return isAuction ? valuationPrice - quote.previousClose : quote.change
+    }
+    private var movementText: String {
+        guard let quote, let change = priceChange else { return isAuction ? "等待竞价" : "等待行情" }
+        if !isAuction { return String(format: "%+.2f  %+.2f%%", change, quote.changePercent) }
+        guard quote.previousClose > 0 else { return String(format: "%+.2f  —", change) }
+        return String(format: "%+.2f  %+.2f%%", change, change / quote.previousClose * 100)
+    }
 
     private var profitColor: Color {
         guard let profit else { return .secondary }
@@ -453,9 +475,9 @@ struct QuoteRow: View {
     }
 
     private var movement: Color {
-        guard let quote else { return .secondary }
-        return quote.change > 0 ? Color(red: 0.85, green: 0.19, blue: 0.24)
-            : quote.change < 0 ? Color(red: 0.06, green: 0.59, blue: 0.38) : .primary
+        guard let change = priceChange else { return .secondary }
+        return change > 0 ? Color(red: 0.85, green: 0.19, blue: 0.24)
+            : change < 0 ? Color(red: 0.06, green: 0.59, blue: 0.38) : .primary
     }
 
     var body: some View {
@@ -484,14 +506,16 @@ struct QuoteRow: View {
                 }
                 Spacer(minLength: 8)
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
-                    Text(quote.map { String(format: "%.2f", $0.price) } ?? "—")
+                    Text(valuationPrice.map { String(format: "%.2f", $0) } ?? "—")
                         .font(.system(size: 21, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                    Text(quote.map { String(format: "%+.2f  %+.2f%%", $0.change, $0.changePercent) } ?? "等待行情")
+                    Text(movementText)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .lineLimit(1)
                 }
                 .foregroundStyle(movement)
+                .help(isAuction ? "集合竞价参考价：优先买一，没有有效买一时用卖一；价格、涨跌与盈亏按同一参考价估算，最终以成交价为准。双侧均无有效价时显示—。"
+                      : "最新可用成交价；浮盈亏按该价格计算。")
             }
             VStack(spacing: 4) {
                 HStack(spacing: 10) {
@@ -551,7 +575,7 @@ struct QuoteRow: View {
                 }
                 .font(.system(size: 10)).lineLimit(1)
                 .foregroundStyle(configuration.hasTriggeredAlerts ? Color.orange : Color.secondary)
-                .help(alertMessage ?? "只有设置后产生的30秒内报价可以触发；每个条件只提醒一次")
+                .help(alertMessage ?? "成交价提醒在集合竞价期间暂停、不消耗触达次数；竞价结束后，只有设置后产生的30秒内报价可以触发，每个条件只提醒一次。")
             }
             if isExpanded {
                 VStack(spacing: 5) {
@@ -602,7 +626,7 @@ struct WidgetView: View {
     private var statusColor: Color {
         if additionError != nil || store.errorMessage != nil || !store.unavailable.isEmpty ||
             !store.invalidTracking.isEmpty || store.trackingStorageNotice != nil ||
-            store.hasStaleQuotes || !store.marketSession.calendarKnown { return .orange }
+            store.hasStaleQuotes || store.missingAuctionPrice || !store.marketSession.calendarKnown { return .orange }
         return store.oldestQuoteTime != nil && store.marketSession.expectsFreshQuotes ? .green : .secondary
     }
     private var statusHelp: String {
@@ -610,7 +634,8 @@ struct WidgetView: View {
         let receiptTime = store.lastReceipt.map { DisplayFormat.chinaTime.string(from: $0) } ?? "—"
         let issue = additionError ?? store.trackingStorageNotice ?? store.errorMessage
         let calendarNotice = store.marketSession.calendarKnown ? "" : "\n年度休市表待更新，工作日保留每秒轮询。"
-        return (issue.map { $0 + "\n" } ?? "") + "腾讯公开行情 · 量额为当日累计。\n最旧源报价：\(sourceTime)；最近接收：\(receiptTime)，均为北京时间。\n\(store.marketSession.label) · \(cadence)。报价年龄是源时间距今，不是网络延迟；连续竞价超过15秒提示过旧。\(calendarNotice)"
+        let auctionNotice = store.isAuction ? "\n竞价时价格和盈亏优先使用买一、买一缺失时用卖一；双侧均缺失时估值显示—。竞价仅为参考，最终以成交价为准；成交价提醒暂停，不消耗触达次数。" : ""
+        return (issue.map { $0 + "\n" } ?? "") + "腾讯公开行情 · 量额为当日累计。\n最旧源报价：\(sourceTime)；最近接收：\(receiptTime)，均为北京时间。\n\(store.marketSession.label) · \(cadence)。报价年龄是源时间距今，不是网络延迟；连续竞价超过15秒提示过旧。\(calendarNotice)\(auctionNotice)"
     }
 
     private var status: String {
@@ -622,6 +647,7 @@ struct WidgetView: View {
                 ?? "连接失败 · 自动重试"
         }
         if !store.unavailable.isEmpty { return "部分行情缺失 · \(quoteAge ?? "自动重试")" }
+        if store.missingAuctionPrice { return "竞价参考价缺失 · 自动重试" }
         if !store.invalidTracking.isEmpty { return "持仓或提醒配置异常 · 点击股票名称修正" }
         if let quoteAge {
             return "\(store.hasStaleQuotes ? "报价过旧" : store.marketSession.label) · \(quoteAge) · \(cadence)"
@@ -709,6 +735,7 @@ struct WidgetView: View {
                     LazyVStack(spacing: 0) {
                         ForEach(store.symbols) { symbol in
                             QuoteRow(symbol: symbol, quote: store.quotes[symbol.id],
+                                     valuationPrice: store.valuationPrice(for: symbol), isAuction: store.isAuction,
                                      failed: store.errorMessage != nil,
                                      unavailable: store.unavailable.contains(symbol.id),
                                      configuration: store.tracking[symbol.id] ?? StockTracking(),
@@ -746,7 +773,7 @@ struct WidgetView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .layoutPriority(1)
-                    .help("单位：元。合计已填写持仓的股票，按各卡片最新可用报价计算；无持仓不计入。缺少持仓报价或配置异常时显示—，总成本已含费用，不重复扣费。")
+                    .help("单位：元。合计已填写持仓的股票，按各卡片当前显示价格计算；竞价时买一优先、卖一兜底，仅作参考。无持仓不计入；缺少持仓估值价或配置异常时显示—。总成本已含费用，不重复扣费。")
                 Button(action: { store.refresh() }) {
                     Image(systemName: "arrow.clockwise")
                 }

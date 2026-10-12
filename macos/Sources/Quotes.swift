@@ -45,6 +45,32 @@ struct Quote: Sendable {
     let turnoverPercent: Double?
     let volumeRatio: Double?
     let amplitudePercent: Double?
+    let bidPrice: Double?
+    let askPrice: Double?
+
+    init(symbol: StockSymbol, name: String, price: Double, previousClose: Double,
+         change: Double, changePercent: Double, volumeLots: Double, amountYuan: Double,
+         timestamp: Date, turnoverPercent: Double?, volumeRatio: Double?, amplitudePercent: Double?,
+         bidPrice: Double? = nil, askPrice: Double? = nil) {
+        self.symbol = symbol
+        self.name = name
+        self.price = price
+        self.previousClose = previousClose
+        self.change = change
+        self.changePercent = changePercent
+        self.volumeLots = volumeLots
+        self.amountYuan = amountYuan
+        self.timestamp = timestamp
+        self.turnoverPercent = turnoverPercent
+        self.volumeRatio = volumeRatio
+        self.amplitudePercent = amplitudePercent
+        self.bidPrice = bidPrice
+        self.askPrice = askPrice
+    }
+
+    func valuationPrice(isAuction: Bool) -> Double? {
+        isAuction ? bidPrice ?? askPrice : price
+    }
 }
 
 enum QuoteParser {
@@ -84,10 +110,13 @@ enum QuoteParser {
             let turnoverPercent = fields.count > 38 ? number(fields[38]).flatMap { $0 >= 0 ? $0 : nil } : nil
             let volumeRatio = fields.count > 49 ? number(fields[49]).flatMap { $0 >= 0 ? $0 : nil } : nil
             let amplitudePercent = fields.count > 43 ? number(fields[43]).flatMap { $0 >= 0 ? $0 : nil } : nil
+            let bidPrice = number(fields[9]).flatMap { $0 > 0 ? $0 : nil }
+            let askPrice = number(fields[19]).flatMap { $0 > 0 ? $0 : nil }
             quotes[symbol.id] = Quote(symbol: symbol, name: name, price: price, previousClose: previousClose,
                                     change: change, changePercent: changePercent, volumeLots: volumeLots,
                                     amountYuan: amountWan * 10_000, timestamp: timestamp, turnoverPercent: turnoverPercent,
-                                    volumeRatio: volumeRatio, amplitudePercent: amplitudePercent)
+                                    volumeRatio: volumeRatio, amplitudePercent: amplitudePercent,
+                                    bidPrice: bidPrice, askPrice: askPrice)
         }
         guard !quotes.isEmpty else { throw QuoteError.noQuotes }
         return quotes

@@ -98,6 +98,7 @@ enum QuoteTests {
         try expect(quote?.turnoverPercent == 0.28, "38号换手率字段已经是百分数，不应再乘100")
         try expect(quote?.volumeRatio == 1.18, "49号量比字段应保留倍数原值，不应乘100")
         try expect(quote?.amplitudePercent == 2.12, "43号振幅字段已经是百分数，不应再乘100")
+        try runAuctionTests(symbol)
         let newer = fixture(symbol, edits: [3: "1264", 30: "20261009145656"])
         let older = fixture(symbol, edits: [3: "1262", 30: "20261009145650"])
         for lines in [newer + older, older + newer] {
@@ -152,5 +153,60 @@ enum QuoteTests {
         for data in [Data(), Data("v_pv_none_match=\"1\";".utf8), Data([0xFF, 0xFF]), encoded(fixture(symbol, count: 37)), Data("<html>error</html>".utf8)] {
             try expectError("空、损坏或不完整响应应有可读错误") { _ = try QuoteParser.parse(data, symbols: [symbol]) }
         }
+    }
+
+    static func runAuctionTests(_ symbol: StockSymbol) throws {
+        let ordinary = Quote(symbol: symbol, name: "测试", price: 1263.12, previousClose: 1255.79,
+                             change: 7.33, changePercent: 0.58, volumeLots: 34719,
+                             amountYuan: 4_403_768_903, timestamp: Date(timeIntervalSince1970: 1_791_529_013),
+                             turnoverPercent: 0.28, volumeRatio: 1.18, amplitudePercent: 2.12)
+        try expect(ordinary.bidPrice == nil && ordinary.askPrice == nil, "原有Quote初始化调用应兼容，默认无买一卖一")
+        try expect(ordinary.valuationPrice(isAuction: false) == 1263.12, "正常交易应继续使用成交价")
+        try expect(ordinary.valuationPrice(isAuction: true) == nil, "竞价缺少买一卖一时不能借用上一笔成交价")
+
+        for (edits, bid, ask, auctionPrice) in [
+            ([9: "1268.12", 19: "1270.34"], 1268.12, 1270.34, 1268.12),
+            ([9: "1268.12"], 1268.12, nil, 1268.12),
+            ([19: "1270.34"], nil, 1270.34, 1270.34),
+            ([:], nil, nil, nil)
+        ] as [([Int: String], Double?, Double?, Double?)] {
+            let quote = try QuoteParser.parse(encoded(fixture(symbol, edits: edits)), symbols: [symbol])[symbol.id]!
+            try expect(quote.bidPrice == bid && quote.askPrice == ask, "应按9号买一、19号卖一读取有效价格：\(edits)")
+            try expect(quote.valuationPrice(isAuction: true) == auctionPrice, "竞价应买一优先、卖一兜底，均缺失时为空：\(edits)")
+            try expect(quote.valuationPrice(isAuction: false) == 1263.12, "正常交易估值不能使用买一卖一：\(edits)")
+            try expect(quote.price == 1263.12 && quote.change == 7.33 && quote.changePercent == 0.58,
+                       "新增盘口字段不能改变成交价及原有涨跌字段：\(edits)")
+        }
+
+        for index in [9, 19] {
+            for value in ["", "0", "-0.01", "NaN", "nan", "inf", "-inf", "Infinity", "bad"] {
+                let otherIndex = index == 9 ? 19 : 9
+                let quote = try QuoteParser.parse(encoded(fixture(symbol, edits: [index: value, otherIndex: "1270.34"])), symbols: [symbol])[symbol.id]!
+                let invalidPrice = index == 9 ? quote.bidPrice : quote.askPrice
+                let validPrice = index == 9 ? quote.askPrice : quote.bidPrice
+                try expect(invalidPrice == nil, "\(index)号买卖价格必须是正有限数，非法时为空：\(value)")
+                try expect(validPrice == 1270.34, "一侧买卖价格非法不能影响另一侧：\(index)=\(value)")
+                try expect(quote.valuationPrice(isAuction: true) == 1270.34, "一侧买卖价格非法时应使用有效一侧：\(index)=\(value)")
+                try expect(quote.price == 1263.12 && quote.valuationPrice(isAuction: false) == 1263.12,
+                           "非法盘口字段仍应保留正常成交价：\(index)=\(value)")
+            }
+        }
+        let invalidBook = try QuoteParser.parse(encoded(fixture(symbol, edits: [9: "0", 19: "bad"])), symbols: [symbol])[symbol.id]!
+        try expect(invalidBook.valuationPrice(isAuction: true) == nil, "竞价两侧都无有效价格时不能生成零价格或沿用成交价")
+
+        let initialLine = fixture(symbol, edits: [9: "1268.12", 19: "1270.34"])
+        let updatedLine = fixture(symbol, edits: [9: "1272.56", 19: "1273.78"])
+        let initial = try QuoteParser.parse(encoded(initialLine), symbols: [symbol])[symbol.id]!
+        let updated = try QuoteParser.parse(encoded(updatedLine), symbols: [symbol])[symbol.id]!
+        try expect(initial.timestamp == updated.timestamp, "盘口刷新测试应保持源时间相同")
+        try expect(updated.bidPrice == 1272.56 && updated.askPrice == 1273.78,
+                   "相同源时间下重新解析仍应更新买一卖一")
+        try expect(initial.valuationPrice(isAuction: true) == 1268.12 && updated.valuationPrice(isAuction: true) == 1272.56,
+                   "相同源时间下盘口变化应改变竞价估值")
+        try expect(initial.price == updated.price && updated.valuationPrice(isAuction: false) == 1263.12,
+                   "相同源时间下盘口变化不应改变成交价")
+        let duplicate = try QuoteParser.parse(encoded(initialLine + updatedLine), symbols: [symbol])[symbol.id]!
+        try expect(duplicate.bidPrice == 1272.56 && duplicate.askPrice == 1273.78,
+                   "同批次相同源时间报价应采用后出现的盘口更新")
     }
 }

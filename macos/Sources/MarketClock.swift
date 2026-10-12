@@ -41,6 +41,8 @@ enum MarketClock {
 
     private static let periods: [(until: TimeInterval, phase: MarketPhase, interval: TimeInterval)] = [
         (9 * 3600 + 14 * 60, .closed, 60),
+        (9 * 3600 + 15 * 60, .preOpen, 1),
+        (9 * 3600 + 25 * 60, .auction, 1),
         (9 * 3600 + 30 * 60, .preOpen, 1),
         (11 * 3600 + 30 * 60, .trading, 1),
         (11 * 3600 + 31 * 60, .lunch, 1),

@@ -49,7 +49,7 @@ enum MarketClockTests {
             NSTimeZone.default = TimeZone(identifier: zone)!
             session(utc, phase: .trading, interval: 1, next: next, label: "报价")
             session(utc.addingTimeInterval(-960), phase: .preOpen, interval: 1,
-                    next: utc, label: "盘前快照")
+                    next: utc.addingTimeInterval(-900), label: "盘前快照")
         }
     }
 
@@ -57,7 +57,9 @@ enum MarketClockTests {
         let dayStart = date()
         let spans: [(start: Int, end: Int, phase: MarketPhase, interval: TimeInterval, label: String)] = [
             (0, 9 * 3600 + 14 * 60, .closed, 60, "休市快照"),
-            (9 * 3600 + 14 * 60, 9 * 3600 + 30 * 60, .preOpen, 1, "盘前快照"),
+            (9 * 3600 + 14 * 60, 9 * 3600 + 15 * 60, .preOpen, 1, "盘前快照"),
+            (9 * 3600 + 15 * 60, 9 * 3600 + 25 * 60, .auction, 1, "竞价快照"),
+            (9 * 3600 + 25 * 60, 9 * 3600 + 30 * 60, .preOpen, 1, "盘前快照"),
             (9 * 3600 + 30 * 60, 11 * 3600 + 30 * 60, .trading, 1, "报价"),
             (11 * 3600 + 30 * 60, 11 * 3600 + 31 * 60, .lunch, 1, "午休快照"),
             (11 * 3600 + 31 * 60, 12 * 3600 + 59 * 60, .lunch, 30, "午休快照"),
@@ -135,7 +137,8 @@ enum MarketClockTests {
             check(MarketClock.isStale(timestamp: now.addingTimeInterval(-age), at: now, session: trading),
                   "盘中超过15秒及旧交易日报价应提示过旧：\(age)")
         }
-        for at in [date(2026, 10, 12, 9, 14), date(2026, 10, 12, 11, 30),
+        for at in [date(2026, 10, 12, 9, 14), date(2026, 10, 12, 9, 15), date(2026, 10, 12, 9, 25),
+                   date(2026, 10, 12, 11, 30),
                    date(2026, 10, 12, 11, 31), date(2026, 10, 12, 12, 59),
                    date(2026, 10, 12, 14, 57), date(2026, 10, 12, 15),
                    date(2026, 10, 12, 15, 31), date(2026, 10, 10, 10), date(2027, 1, 4, 10)] {
