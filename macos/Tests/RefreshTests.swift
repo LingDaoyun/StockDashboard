@@ -7,6 +7,7 @@ private final class RefreshProbe {
     var maximumActive = 0
     var delay: TimeInterval = 0.02
     var failures: [URLError.Code] = []
+    var clock: () -> Date = Date.init
 
     func reset(delay: TimeInterval) {
         lock.lock(); defer { lock.unlock() }
@@ -17,6 +18,18 @@ private final class RefreshProbe {
     func failNext(_ error: URLError.Code) {
         lock.lock(); defer { lock.unlock() }
         failures.append(error)
+    }
+
+    func useClock(_ clock: @escaping () -> Date) {
+        lock.lock(); defer { lock.unlock() }
+        self.clock = clock
+    }
+
+    var quoteTime: Date {
+        lock.lock()
+        let currentClock = clock
+        lock.unlock()
+        return currentClock()
     }
 
     var snapshot: (requests: [(Date, String)], active: Int, maximumActive: Int) {
@@ -56,7 +69,7 @@ private final class RefreshProtocol: URLProtocol {
             formatter.locale = Locale(identifier: "en_US_POSIX")
             formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
             formatter.dateFormat = "yyyyMMddHHmmss"
-            let timestamp = formatter.string(from: Date())
+            let timestamp = formatter.string(from: Self.probe.quoteTime)
             let data = ["sh600108", "sz002580"].map { id -> String in
                 var fields = Array(repeating: "", count: 58)
                 fields[1] = "synthetic"; fields[2] = String(id.dropFirst(2))
@@ -93,11 +106,18 @@ func runRefreshTests() throws -> Int {
     let defaults = UserDefaults(suiteName: domain)!
     defaults.set("600108,002580", forKey: "symbols")
     defer { defaults.removePersistentDomain(forName: domain) }
-    func makeStore() -> QuoteStore {
-        QuoteStore(defaults: defaults, preview: nil, client: QuoteClient(makeSession: { configuration in
+    func marketDate(_ time: String, day: String = "2026-10-12") -> Date {
+        ISO8601DateFormatter().date(from: "\(day)T\(time)+08:00")!
+    }
+    func makeStore(at start: Date? = nil) -> QuoteStore {
+        let start = start ?? marketDate("10:00:00")
+        let realStart = Date()
+        let clock: () -> Date = { start.addingTimeInterval(Date().timeIntervalSince(realStart)) }
+        RefreshProtocol.probe.useClock(clock)
+        return QuoteStore(defaults: defaults, preview: nil, client: QuoteClient(makeSession: { configuration in
             configuration.protocolClasses = [RefreshProtocol.self]
             return URLSession(configuration: configuration)
-        }))
+        }), clock: clock)
     }
     func spin(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
         let end = Date().addingTimeInterval(seconds)
@@ -120,29 +140,52 @@ func runRefreshTests() throws -> Int {
     check(regular.requests.allSatisfy { $0.1 == "https://qt.gtimg.cn/q=sh600108,sz002580" }, "每秒仍为所有股票一次批量请求")
     spin(0.2, until: { normal.quotes.count == 2 })
     check(normal.quotes.count == 2 && normal.errorMessage == nil, "每秒刷新正常更新行情缓存")
+    check(normal.lastReceipt.map { $0 >= marketDate("10:00:00") && $0 < marketDate("10:00:04") } == true,
+          "接收时间来自随真实耗时前进的模拟交易时钟")
+    check(normal.quotes.values.allSatisfy { $0.timestamp >= marketDate("10:00:00") && $0.timestamp <= normal.marketNow },
+          "源报价和接收端共用模拟时钟，不受真实日期及当前是否超过10点影响")
+    spin(0.3, until: { !normal.isRefreshing })
+    let beforeRepeatedStart = RefreshProtocol.probe.snapshot.requests.count
+    normal.start()
+    spin(0.2)
+    check(RefreshProtocol.probe.snapshot.requests.count == beforeRepeatedStart, "重复start不立即请求或重复启动定时器")
     normal.stop()
     spin(0.1, until: { RefreshProtocol.probe.snapshot.active == 0 })
 
     RefreshProtocol.probe.reset(delay: 2.3)
     let slow = makeStore()
     defer { slow.stop() }
+    let slowStart = slow.marketNow
+    let sourceTime = slowStart.addingTimeInterval(-14.5)
+    let symbol = slow.symbols[0]
+    let cachedQuote = Quote(symbol: symbol, name: "synthetic", price: 10, previousClose: 10,
+                            change: 0, changePercent: 0, volumeLots: 100, amountYuan: 10_000,
+                            timestamp: sourceTime, turnoverPercent: nil, volumeRatio: nil, amplitudePercent: nil)
+    slow.receive([symbol.id: cachedQuote], requested: slow.symbols, at: slowStart)
+    check(slow.oldestQuoteTime == sourceTime && !slow.hasStaleQuotes, "模拟缓存刚建立时源报价尚未超过15秒")
     slow.start()
     spin(0.4, until: { RefreshProtocol.probe.snapshot.requests.count == 1 })
     slow.refresh(); slow.refresh()
     spin(2.05)
     check(RefreshProtocol.probe.snapshot.requests.count == 1, "慢请求期间每秒触发与手动刷新均不叠加请求")
     check(RefreshProtocol.probe.snapshot.maximumActive == 1, "慢网络最多只有一笔在途请求")
+    check(slow.marketNow.timeIntervalSince(slowStart) >= 1.5 && slow.hasStaleQuotes
+          && slow.oldestQuoteTime == sourceTime,
+          "请求未完成时每秒仍更新界面时间，缓存跨过15秒后显示过旧且源时间不变")
     spin(1.5, until: { RefreshProtocol.probe.snapshot.requests.count == 2 })
     check(RefreshProtocol.probe.snapshot.requests.count == 2, "慢请求结束后自动恢复下一次轮询")
     slow.suspend()
     spin(0.4, until: { RefreshProtocol.probe.snapshot.active == 0 })
     check(!slow.isRefreshing && RefreshProtocol.probe.snapshot.active == 0, "睡眠暂停取消在途请求")
     let beforePause = RefreshProtocol.probe.snapshot.requests.count
+    let pausedTime = slow.marketNow
     spin(1.15)
     check(RefreshProtocol.probe.snapshot.requests.count == beforePause, "暂停期间定时器不会请求")
+    check(slow.marketNow == pausedTime, "暂停真正取消定时器，界面时钟也不继续跳动")
     slow.resume()
     spin(0.4, until: { RefreshProtocol.probe.snapshot.requests.count > beforePause })
     check(RefreshProtocol.probe.snapshot.requests.count == beforePause + 1, "唤醒立即请求，不等待下一秒")
+    check(slow.marketNow > pausedTime, "唤醒立即恢复当前时钟")
     slow.stop()
     spin(0.4, until: { RefreshProtocol.probe.snapshot.active == 0 })
     check(RefreshProtocol.probe.snapshot.maximumActive == 1, "取消和唤醒后仍不重叠")
@@ -185,6 +228,12 @@ func runRefreshTests() throws -> Int {
     spin(0.3, until: { RefreshProtocol.probe.snapshot.active == 0 })
     check(!changing.isRefreshing && changing.symbols.isEmpty && changing.quotes.isEmpty && changing.errorMessage == nil,
           "在途清空列表后停止网络并清缓存，取消不显示故障")
+    let emptyTime = changing.marketNow
+    let beforeEmptyWait = RefreshProtocol.probe.snapshot.requests.count
+    spin(1.15)
+    check(changing.marketNow == emptyTime && RefreshProtocol.probe.snapshot.requests.count == beforeEmptyWait
+          && changing.oldestQuoteTime == nil && !changing.hasStaleQuotes,
+          "空列表停止定时器，时钟不跳动且没有过旧报价")
     try changing.addSymbols("002580")
     spin(0.3, until: { RefreshProtocol.probe.snapshot.requests.count == 3 })
     check(RefreshProtocol.probe.snapshot.requests.last?.1 == "https://qt.gtimg.cn/q=sz002580" && changing.isRefreshing,
@@ -192,5 +241,53 @@ func runRefreshTests() throws -> Int {
     spin(0.8, until: { changing.quotes.count == 1 })
     check(changing.quotes.keys.sorted() == ["sz002580"] && !changing.isRefreshing && changing.errorMessage == nil,
           "恢复的缓存仅包含最新自选列表，旧请求不覆盖")
+    spin(1.3, until: { RefreshProtocol.probe.snapshot.requests.count >= 4 })
+    check(RefreshProtocol.probe.snapshot.requests.count >= 4, "清空后重新添加恢复每秒轮询")
+    changing.stop()
+    spin(0.4, until: { RefreshProtocol.probe.snapshot.active == 0 })
+
+    defaults.set("600108,002580", forKey: "symbols")
+    for (at, phase, interval) in [(marketDate("10:00:00", day: "2026-10-11"), MarketPhase.closed, 60.0),
+                                  (marketDate("11:32:00"), MarketPhase.lunch, 30.0)] {
+        RefreshProtocol.probe.reset(delay: 0.02)
+        let quiet = makeStore(at: at)
+        quiet.start()
+        spin(0.3, until: { RefreshProtocol.probe.snapshot.requests.count == 1 })
+        check(RefreshProtocol.probe.snapshot.requests.count == 1 && quiet.marketSession.phase == phase
+              && quiet.marketSession.pollInterval == interval, "休市或午休启动仍立即请求一次快照")
+        spin(1.15)
+        check(RefreshProtocol.probe.snapshot.requests.count == 1 && quiet.quotes.count == 2 && !quiet.hasStaleQuotes,
+              "休市或午休降频，超过一秒不再密集请求也不报陈旧警告")
+        quiet.stop()
+        spin(0.4, until: { RefreshProtocol.probe.snapshot.active == 0 })
+    }
+
+    for boundary in [marketDate("09:14:00"), marketDate("12:59:00")] {
+        RefreshProtocol.probe.reset(delay: 0.02)
+        let opening = makeStore(at: boundary.addingTimeInterval(-0.3))
+        opening.start()
+        spin(1.9, until: { RefreshProtocol.probe.snapshot.requests.count >= 3 })
+        let requests = RefreshProtocol.probe.snapshot.requests
+        check(requests.count >= 3 && opening.marketSession.phase == .preOpen
+              && opening.marketSession.pollInterval == 1,
+              "开盘准备边界到达后立即恢复每秒请求，不等原30或60秒间隔")
+        let gaps = zip(requests.dropFirst(), requests).map { $0.0.timeIntervalSince($1.0) }
+        check(gaps.count >= 2 && gaps[0] >= 0.15 && gaps[0] < 0.8 && gaps[1] >= 0.8 && gaps[1] < 1.6,
+              "下一次定时器先准确落在0.3秒后的开盘准备边界，再按一秒继续")
+        opening.stop()
+        spin(0.4, until: { RefreshProtocol.probe.snapshot.active == 0 })
+    }
+
+    RefreshProtocol.probe.reset(delay: 0.02)
+    let closing = makeStore(at: marketDate("15:31:00").addingTimeInterval(-0.3))
+    closing.start()
+    spin(0.8, until: { closing.marketSession.phase == .closed && RefreshProtocol.probe.snapshot.requests.count >= 2 })
+    check(closing.marketSession.phase == .closed && closing.marketSession.pollInterval == 60
+          && RefreshProtocol.probe.snapshot.requests.count == 2, "盘后结束边界请求一次后切换到60秒休市轮询")
+    let afterClose = RefreshProtocol.probe.snapshot.requests.count
+    spin(1.15)
+    check(RefreshProtocol.probe.snapshot.requests.count == afterClose, "进入休市后停止一秒密集请求")
+    closing.stop()
+    spin(0.4, until: { RefreshProtocol.probe.snapshot.active == 0 })
     return checks
 }

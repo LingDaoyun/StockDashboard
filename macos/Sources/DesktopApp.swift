@@ -14,6 +14,7 @@ final class QuoteStore: ObservableObject {
     @Published private(set) var lastReceipt: Date?
     @Published private(set) var errorMessage: String?
     @Published private(set) var isRefreshing = false
+    @Published private(set) var marketNow: Date
     @Published var isAddingStock = false
     @Published var isAdjustingTransparency = false
     @Published var expandedSymbolID: String?
@@ -41,7 +42,9 @@ final class QuoteStore: ObservableObject {
     private var request: Task<Void, Never>?
     private var activity: NSObjectProtocol?
     private var suspended = false
+    private var started = false
     private let client: QuoteClient
+    private let clock: () -> Date
     private var undecodableTracking: [String: TrackingJSONValue] = [:]
     private var backedUpCorruptTracking = false
 
@@ -75,8 +78,11 @@ final class QuoteStore: ObservableObject {
         }
     }
 
-    init(defaults: UserDefaults, preview: String?, client: QuoteClient = QuoteClient()) {
+    init(defaults: UserDefaults, preview: String?, client: QuoteClient = QuoteClient(),
+         clock: @escaping () -> Date = Date.init) {
         self.client = client
+        self.clock = clock
+        self.marketNow = clock()
         self.defaults = defaults
         self.isPreview = preview != nil
         let saved = preview ?? defaults.string(forKey: "symbols") ?? ""
@@ -109,6 +115,12 @@ final class QuoteStore: ObservableObject {
     }
 
     var codeText: String { symbols.map(\.id).joined(separator: ", ") }
+
+    var marketSession: MarketSession { MarketClock.session(at: marketNow) }
+    var oldestQuoteTime: Date? { quotes.values.map(\.timestamp).min() }
+    var hasStaleQuotes: Bool {
+        oldestQuoteTime.map { MarketClock.isStale(timestamp: $0, at: marketNow, session: marketSession) } ?? false
+    }
 
     var totalPositionProfit: Decimal? {
         guard trackingStorageNotice == nil, !invalidTracking.values.contains(where: {
@@ -234,14 +246,31 @@ final class QuoteStore: ObservableObject {
     }
 
     func start() {
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
-        timer.tolerance = 0.1
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-        updateActivity()
+        guard !started else { return }
+        started = true
+        suspended = false
         refresh()
+        scheduleNextTick()
+    }
+
+    private func scheduleNextTick() {
+        timer?.invalidate()
+        timer = nil
+        guard started, !suspended, !symbols.isEmpty else { return }
+        let now = clock()
+        let session = MarketClock.session(at: now)
+        let delay = max(0.01, min(session.pollInterval, session.nextChange.timeIntervalSince(now)))
+        let next = Timer(timeInterval: delay, repeats: false) { [weak self] fired in
+            Task { @MainActor in
+                guard let self, self.timer === fired, self.started, !self.suspended else { return }
+                self.timer = nil
+                self.refresh()
+                self.scheduleNextTick()
+            }
+        }
+        next.tolerance = min(0.1, delay / 10)
+        RunLoop.main.add(next, forMode: .common)
+        timer = next
     }
 
     func saveSymbols(_ text: String) throws {
@@ -280,12 +309,14 @@ final class QuoteStore: ObservableObject {
         if values.isEmpty {
             quotes = [:]
         }
-        updateActivity()
         refresh()
+        scheduleNextTick()
     }
 
     func suspend() {
         suspended = true
+        timer?.invalidate()
+        timer = nil
         request?.cancel()
         request = nil
         isRefreshing = false
@@ -293,29 +324,33 @@ final class QuoteStore: ObservableObject {
     }
 
     func resume() {
+        guard started else { return }
         suspended = false
-        updateActivity()
         refresh()
+        scheduleNextTick()
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        started = false
         suspend()
     }
 
     private func updateActivity() {
-        if let activity { ProcessInfo.processInfo.endActivity(activity) }
-        activity = nil
-        if !symbols.isEmpty && !suspended {
+        let needsActivity = started && !symbols.isEmpty && !suspended && marketSession.pollInterval == 1
+        if !needsActivity, let activity {
+            ProcessInfo.processInfo.endActivity(activity)
+            self.activity = nil
+        } else if needsActivity, activity == nil {
             activity = ProcessInfo.processInfo.beginActivity(
                 options: .userInitiatedAllowingIdleSystemSleep,
-                reason: "用户指定的桌面行情每1秒刷新"
+                reason: "交易及开盘准备时段保持行情每秒刷新"
             )
         }
     }
 
     func refresh() {
+        marketNow = clock()
+        updateActivity()
         guard !suspended, !symbols.isEmpty, !isRefreshing else { return }
         let requested = symbols
         isRefreshing = true
@@ -328,7 +363,7 @@ final class QuoteStore: ObservableObject {
             do {
                 let incoming = try await client.fetch(requested)
                 guard !Task.isCancelled else { return }
-                receive(incoming, requested: requested, at: Date())
+                receive(incoming, requested: requested, at: clock())
                 if isPreview {
                     let values = requested.compactMap { symbol -> String? in
                         guard let q = incoming[symbol.id] else { return nil }
@@ -351,6 +386,7 @@ final class QuoteStore: ObservableObject {
     }
 
     func receive(_ incoming: [String: Quote], requested: [StockSymbol], at receipt: Date) {
+        marketNow = receipt
         let current = Set(symbols.map(\.id))
         let requestedIDs = Set(requested.map(\.id)).intersection(current)
         var accepted: [String: Quote] = [:]
@@ -559,22 +595,36 @@ struct WidgetView: View {
     @State private var additionError: String?
     @FocusState private var codeFocused: Bool
 
+    private var cadence: String { "\(Int(store.marketSession.pollInterval))秒刷新" }
+    private var quoteAge: String? {
+        store.oldestQuoteTime.map { MarketClock.ageText(since: $0, at: store.marketNow) }
+    }
+    private var statusColor: Color {
+        if additionError != nil || store.errorMessage != nil || !store.unavailable.isEmpty ||
+            !store.invalidTracking.isEmpty || store.trackingStorageNotice != nil ||
+            store.hasStaleQuotes || !store.marketSession.calendarKnown { return .orange }
+        return store.oldestQuoteTime != nil && store.marketSession.expectsFreshQuotes ? .green : .secondary
+    }
+    private var statusHelp: String {
+        let sourceTime = store.oldestQuoteTime.map { DisplayFormat.chinaTime.string(from: $0) } ?? "—"
+        let receiptTime = store.lastReceipt.map { DisplayFormat.chinaTime.string(from: $0) } ?? "—"
+        let issue = additionError ?? store.trackingStorageNotice ?? store.errorMessage
+        let calendarNotice = store.marketSession.calendarKnown ? "" : "\n年度休市表待更新，工作日保留每秒轮询。"
+        return (issue.map { $0 + "\n" } ?? "") + "腾讯公开行情 · 量额为当日累计。\n最旧源报价：\(sourceTime)；最近接收：\(receiptTime)，均为北京时间。\n\(store.marketSession.label) · \(cadence)。报价年龄是源时间距今，不是网络延迟；连续竞价超过15秒提示过旧。\(calendarNotice)"
+    }
+
     private var status: String {
         if let additionError { return additionError }
         if let notice = store.trackingStorageNotice { return notice }
-        if store.symbols.isEmpty { return "添加股票后，每1秒自动刷新" }
-        let quoteTime = store.quotes.values.map(\.timestamp).min()
+        if store.symbols.isEmpty { return "添加股票后，按交易时段自动刷新" }
         if store.errorMessage != nil {
-            return quoteTime.map { "连接失败 · 上次行情 \(DisplayFormat.chinaTime.string(from: $0))" }
+            return quoteAge.map { "连接失败 · \($0) · 自动重试" }
                 ?? "连接失败 · 自动重试"
         }
-        if !store.unavailable.isEmpty { return "部分股票无可用行情 · 自动刷新" }
+        if !store.unavailable.isEmpty { return "部分行情缺失 · \(quoteAge ?? "自动重试")" }
         if !store.invalidTracking.isEmpty { return "持仓或提醒配置异常 · 点击股票名称修正" }
-        if let quoteTime {
-            return "行情 \(DisplayFormat.chinaTime.string(from: quoteTime)) · 1秒刷新"
-        }
-        if let date = store.lastReceipt {
-            return "请求成功 \(DisplayFormat.receiptTime.string(from: date)) · 1秒刷新"
+        if let quoteAge {
+            return "\(store.hasStaleQuotes ? "报价过旧" : store.marketSession.label) · \(quoteAge) · \(cadence)"
         }
         return "正在连接行情源…"
     }
@@ -684,10 +734,10 @@ struct WidgetView: View {
             Divider().opacity(0.6)
             HStack(spacing: 6) {
                 Circle()
-                    .fill(additionError != nil || store.errorMessage != nil || !store.unavailable.isEmpty || !store.invalidTracking.isEmpty || store.trackingStorageNotice != nil ? Color.orange
-                          : store.lastReceipt != nil ? Color.green : Color.secondary)
+                    .fill(statusColor)
                     .frame(width: 5, height: 5)
                 Text(status).lineLimit(1)
+                    .foregroundStyle(store.hasStaleQuotes ? Color.orange : Color.secondary)
                 Spacer(minLength: 0)
                 let total = store.totalPositionProfit
                 Text("总盈亏 \(total.map { yuanText($0, showSign: $0 != 0) } ?? "—")")
@@ -708,7 +758,7 @@ struct WidgetView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 16)
             .frame(height: 31)
-            .help(additionError ?? store.trackingStorageNotice ?? store.errorMessage ?? "腾讯公开行情 · 成交量与成交额为当日累计；底部行情时间取列表最早一条，北京时间。最近接收：\(store.lastReceipt.map { DisplayFormat.chinaTime.string(from: $0) } ?? "—")")
+            .help(statusHelp)
         }
         .background(Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
