@@ -617,6 +617,10 @@ struct WidgetView: View {
     let configure: (StockSymbol) -> Void
     @State private var newCode = ""
     @State private var additionError: String?
+    @State private var searchClient = StockSearchClient()
+    @State private var searchTask: Task<Void, Never>?
+    @State private var isSearching = false
+    @State private var searchResults: [StockSearchResult] = []
     @FocusState private var codeFocused: Bool
 
     private var cadence: String { "\(Int(store.marketSession.pollInterval))秒刷新" }
@@ -640,6 +644,7 @@ struct WidgetView: View {
 
     private var status: String {
         if let additionError { return additionError }
+        if isSearching { return "正在搜索股票…" }
         if let notice = store.trackingStorageNotice { return notice }
         if store.symbols.isEmpty { return "添加股票后，按交易时段自动刷新" }
         if store.errorMessage != nil {
@@ -659,14 +664,14 @@ struct WidgetView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if store.isAddingStock {
-                    TextField("股票代码，回车追加", text: $newCode)
+                    TextField("代码或名称，回车添加", text: $newCode)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12, design: .monospaced))
                         .focused($codeFocused)
-                        .accessibilityLabel("追加股票代码")
+                        .accessibilityLabel("追加股票代码或名称")
                         .onSubmit(addInline)
                         .onExitCommand { store.isAddingStock = false }
-                        .onChange(of: newCode) { _ in additionError = nil }
+                        .onChange(of: newCode) { _ in cancelSearch(); additionError = nil }
                         .onAppear {
                             DispatchQueue.main.async {
                                 if store.isAddingStock { codeFocused = true }
@@ -721,7 +726,7 @@ struct WidgetView: View {
                         .foregroundStyle(.secondary)
                     Text("添加你关注的A股")
                         .font(.system(size: 15, weight: .medium))
-                    Text("输入股票代码，即可查看量价信息")
+                    Text("输入股票代码或中文简称，即可查看行情")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                     Button("添加股票", action: add)
@@ -790,19 +795,96 @@ struct WidgetView: View {
         .background(Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.10), lineWidth: 1))
+        .overlay(alignment: .topLeading) {
+            if store.isAddingStock && !searchResults.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("请选择要添加的股票")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .padding(8)
+                    Divider()
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(searchResults) { result in
+                                Button { appendStock(result.symbol.id) } label: {
+                                    HStack {
+                                        Text(result.name).lineLimit(1)
+                                        Spacer()
+                                        Text(result.symbol.id.uppercased()).monospacedDigit()
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .font(.system(size: 12))
+                                    .padding(.horizontal, 10).padding(.vertical, 8)
+                                    .frame(maxWidth: .infinity)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("添加\(result.name)，\(result.symbol.id.uppercased())")
+                            }
+                        }
+                    }
+                    .frame(height: max(34, min(CGFloat(searchResults.count) * 34, store.listHeight - 42)))
+                }
+                .frame(width: 338)
+                .background(.regularMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.15), lineWidth: 1))
+                .padding(.horizontal, 16).padding(.top, 50)
+            }
+        }
         .onExitCommand {
             store.isAddingStock = false
             store.isAdjustingTransparency = false
             store.expandedSymbolID = nil
         }
         .onChange(of: store.isAddingStock) { adding in
-            if !adding { codeFocused = false; newCode = ""; additionError = nil }
+            if !adding { cancelSearch(); codeFocused = false; newCode = ""; additionError = nil }
         }
+        .onDisappear { cancelSearch() }
     }
 
     private func addInline() {
+        cancelSearch()
+        additionError = nil
+        let query = newCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        if query.isEmpty || (try? StockSymbol.parseList(query)) != nil ||
+            query.allSatisfy({ $0.isASCII && ($0.isNumber || $0.isWhitespace || ",，".contains($0)) }) {
+            appendStock(query)
+            return
+        }
+        isSearching = true
+        searchTask = Task { @MainActor in
+            defer {
+                if !Task.isCancelled { isSearching = false; searchTask = nil }
+            }
+            do {
+                let results = try await searchClient.search(query)
+                guard !Task.isCancelled, store.isAddingStock,
+                      newCode.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+                if let result = StockSearchResult.automaticMatch(in: results, query: query) {
+                    appendStock(result.symbol.id)
+                } else if results.isEmpty {
+                    additionError = "未找到A股，请输入证券简称或股票代码"
+                } else {
+                    searchResults = results
+                    codeFocused = true
+                }
+            } catch {
+                if !Task.isCancelled { additionError = error.localizedDescription }
+            }
+        }
+    }
+
+    private func cancelSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        isSearching = false
+        searchResults = []
+    }
+
+    private func appendStock(_ code: String) {
         do {
-            try store.addSymbols(newCode)
+            try store.addSymbols(code)
+            cancelSearch()
             newCode = ""
             additionError = nil
             codeFocused = true
@@ -1066,7 +1148,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     }
 
     @objc private func showPanel() { edgeDock?.show() }
-    @objc private func hidePanel() { edgeDock?.hide() }
+    @objc private func hidePanel() {
+        store.isAddingStock = false
+        edgeDock?.hide()
+    }
     @objc private func refresh() { store.refresh() }
     @objc private func quit() { NSApp.terminate(nil) }
 
