@@ -664,14 +664,14 @@ struct WidgetView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if store.isAddingStock {
-                    TextField("代码或名称，回车添加", text: $newCode)
+                    TextField("名称自动搜，代码回车加", text: $newCode)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12, design: .monospaced))
                         .focused($codeFocused)
                         .accessibilityLabel("追加股票代码或名称")
                         .onSubmit(addInline)
                         .onExitCommand { store.isAddingStock = false }
-                        .onChange(of: newCode) { _ in cancelSearch(); additionError = nil }
+                        .onChange(of: newCode) { _ in updateInlineSearch() }
                         .onAppear {
                             DispatchQueue.main.async {
                                 if store.isAddingStock { codeFocused = true }
@@ -851,16 +851,32 @@ struct WidgetView: View {
             appendStock(query)
             return
         }
+        searchStocks(query, addWhenUnique: true)
+    }
+
+    private func updateInlineSearch() {
+        cancelSearch()
+        additionError = nil
+        let query = newCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard store.isAddingStock, !query.isEmpty, (try? StockSymbol.parseList(query)) == nil,
+              !query.allSatisfy({ $0.isASCII && ($0.isNumber || $0.isWhitespace || ",，".contains($0)) }) else { return }
+        searchStocks(query, addWhenUnique: false, debounce: true)
+    }
+
+    private func searchStocks(_ query: String, addWhenUnique: Bool, debounce: Bool = false) {
         isSearching = true
         searchTask = Task { @MainActor in
             defer {
                 if !Task.isCancelled { isSearching = false; searchTask = nil }
             }
             do {
+                if debounce { try await Task.sleep(nanoseconds: 350_000_000) }
+                guard !Task.isCancelled, store.isAddingStock,
+                      newCode.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
                 let results = try await searchClient.search(query)
                 guard !Task.isCancelled, store.isAddingStock,
                       newCode.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
-                if let result = StockSearchResult.automaticMatch(in: results, query: query) {
+                if addWhenUnique, let result = StockSearchResult.automaticMatch(in: results, query: query) {
                     appendStock(result.symbol.id)
                 } else if results.isEmpty {
                     additionError = "未找到A股，请输入证券简称或股票代码"
