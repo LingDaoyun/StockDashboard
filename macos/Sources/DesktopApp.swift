@@ -678,6 +678,37 @@ struct WidgetView: View {
                             }
                         }
                         .frame(maxWidth: .infinity)
+                        .overlay(alignment: .topLeading) {
+                            if !searchResults.isEmpty {
+                                ScrollView {
+                                    VStack(spacing: 0) {
+                                        ForEach(searchResults) { result in
+                                            Button { appendStock(result.symbol.id) } label: {
+                                                HStack(spacing: 6) {
+                                                    Text(result.name).lineLimit(1)
+                                                    Spacer(minLength: 0)
+                                                    Text(result.symbol.id.uppercased()).monospacedDigit()
+                                                        .foregroundStyle(.secondary)
+                                                        .fixedSize()
+                                                }
+                                                .font(.system(size: 11))
+                                                .padding(.horizontal, 8)
+                                                .frame(height: 34)
+                                                .frame(maxWidth: .infinity)
+                                                .contentShape(Rectangle())
+                                            }
+                                            .buttonStyle(.plain)
+                                            .accessibilityLabel("添加\(result.name)，\(result.symbol.id.uppercased())")
+                                        }
+                                    }
+                                }
+                                .frame(height: min(CGFloat(searchResults.count) * 34, store.listHeight))
+                                .background(.regularMaterial)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .offset(y: 30)
+                            }
+                        }
+                        .zIndex(1)
                 } else if !store.isAdjustingTransparency {
                     HStack(spacing: 8) {
                         Image(systemName: "chart.xyaxis.line")
@@ -718,6 +749,7 @@ struct WidgetView: View {
             }
             .padding(.horizontal, 16)
             .frame(height: 48)
+            .zIndex(1)
             Divider().opacity(0.6)
             if store.symbols.isEmpty {
                 VStack(spacing: 12) {
@@ -795,42 +827,6 @@ struct WidgetView: View {
         .background(Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.10), lineWidth: 1))
-        .overlay(alignment: .topLeading) {
-            if store.isAddingStock && !searchResults.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("请选择要添加的股票")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                        .padding(8)
-                    Divider()
-                    ScrollView {
-                        VStack(spacing: 0) {
-                            ForEach(searchResults) { result in
-                                Button { appendStock(result.symbol.id) } label: {
-                                    HStack {
-                                        Text(result.name).lineLimit(1)
-                                        Spacer()
-                                        Text(result.symbol.id.uppercased()).monospacedDigit()
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .font(.system(size: 12))
-                                    .padding(.horizontal, 10).padding(.vertical, 8)
-                                    .frame(maxWidth: .infinity)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("添加\(result.name)，\(result.symbol.id.uppercased())")
-                            }
-                        }
-                    }
-                    .frame(height: max(34, min(CGFloat(searchResults.count) * 34, store.listHeight - 42)))
-                }
-                .frame(width: 338)
-                .background(.regularMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.15), lineWidth: 1))
-                .padding(.horizontal, 16).padding(.top, 50)
-            }
-        }
         .onExitCommand {
             store.isAddingStock = false
             store.isAdjustingTransparency = false
