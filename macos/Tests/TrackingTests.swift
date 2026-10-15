@@ -34,13 +34,62 @@ enum TrackingTests {
         check(!empty.hasPosition && !empty.hasAlerts && !empty.hasTriggeredAlerts, "新配置没有持仓或提醒")
         check(empty.profit(at: 10) == nil, "没有持仓时不计算盈亏")
 
+        let perShareData = Data(#"{"costPrice":10.123,"perShareCostYuan":10.12345678,"quantity":500,"upperTriggered":false,"lowerTriggered":false}"#.utf8)
+        let perShareDecoded = try JSONDecoder().decode(StockTracking.self, from: perShareData).validated()
+        check(perShareDecoded.profit(at: 12)?.amountText == "+938.27", "做T后的每股成本保留完整精度，不能由展示均价反算")
+        let perShare = try StockTracking.parse(cost: "", quantity: "500", upper: "13", lower: "9", perShareCost: " 010.12345678 ")
+        check(perShare.perShareCostYuan == Decimal(string: "10.12345678") && perShare.hasPosition, "每股成本模式保存完整十进制和当前股数")
+        check(perShare.costPrice == 10.12345678 && perShare.totalCostYuan == nil && perShare.purchaseAmountYuan == nil && perShare.purchaseCommissionRate == nil,
+              "每股成本不产生买入金额、总成本或预估手续费来源")
+        check(perShare.totalCostText == "5061.73" && perShare.profit(at: 12)?.amountText == "+938.27", "总成本展示可按分四舍五入，计算仍使用未舍入每股成本")
+        check(abs(perShare.profit(at: 12)!.percent! - (938.27161 / 5061.72839 * 100)) < 0.00000001, "每股成本的盈亏率使用精确成本乘当前股数为分母")
+        let perShareRoundtrip = try JSONDecoder().decode(StockTracking.self, from: JSONEncoder().encode(perShare)).validated()
+        check(perShareRoundtrip == perShare && perShareRoundtrip.profit(at: 12)?.amountText == "+938.27", "编码恢复不把精确每股成本降为Double或展示精度")
+        for text in ["0", "-0.00000000", "-.50", "-1.23456789"] {
+            var nonpositive = try StockTracking.parse(cost: "", quantity: "600", upper: "12", lower: "", perShareCost: text)
+            let cost = Decimal(string: text)!
+            check(nonpositive.hasPosition && nonpositive.perShareCostYuan == cost, "做T后零或负每股成本仍是有效持仓：\(text)")
+            check(nonpositive.profit(at: 10)?.amount == Decimal(6000) - cost * Decimal(600) ||
+                  nonpositive.profit(at: 10)?.amountText == yuanText(Decimal(6000) - cost * Decimal(600), showSign: true),
+                  "非正成本正常计算浮盈亏金额：\(text)")
+            check(nonpositive.profit(at: 10)?.percent == nil, "非正成本没有可解释的盈亏率，保持金额有效：\(text)")
+            nonpositive.upperTriggered = true
+            nonpositive.armedAt = Date(timeIntervalSince1970: 1234)
+            let restored = try JSONDecoder().decode(StockTracking.self, from: JSONEncoder().encode(nonpositive)).validated()
+            check(restored == nonpositive && restored.upperTriggered && restored.armedAt == nonpositive.armedAt,
+                  "零或负成本恢复保留已触发提醒与设置时间：\(text)")
+        }
+        for text in ["nan", "inf", "1e2", "1.234567891", "10abc", "1,000", "１.２", "1.", ".", "+1", "99999999999999999999999999999999999999.99999999"] {
+            rejects("每股成本拒绝非普通十进制或超出可精确范围的输入：\(text)") {
+                _ = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", perShareCost: text)
+            }
+        }
+        rejects("每股成本缺少股数时不能保存") { _ = try StockTracking.parse(cost: "", quantity: "", upper: "", lower: "", perShareCost: "10") }
+        rejects("每股成本不能同时保存总成本") { _ = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", totalCost: "1000", perShareCost: "10") }
+        rejects("每股成本不能同时保存买入金额") { _ = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", purchaseAmount: "1000", perShareCost: "10") }
+        rejects("每股成本不能携带预估费率") { _ = try StockTracking.parse(cost: "", quantity: "100", upper: "", lower: "", purchaseCommissionRate: Decimal(string: "2.5"), perShareCost: "10") }
+        rejects("每股成本乘股数若丢失精度则不能保存") { _ = try StockTracking.parse(cost: "", quantity: String(Int.max), upper: "", lower: "", perShareCost: "123456789012345678901234567890.12345678") }
+        for value in [Decimal.nan, Decimal(string: "0.000000001")!] {
+            let malformed = StockTracking(quantity: 100, perShareCostYuan: value)
+            rejects("恢复时拒绝无效每股成本或超过八位小数的成本") { _ = try malformed.validated() }
+            check(malformed.profit(at: 12) == nil, "无效每股成本不参与盈亏")
+        }
+        let mixed = StockTracking(quantity: 100, totalCostYuan: 1000, perShareCostYuan: 10)
+        rejects("恢复时拒绝冲突的每股和总成本") { _ = try mixed.validated() }
+        check(mixed.profit(at: 12) == nil, "冲突成本不能生成误导盈亏")
+        let clearedPerShare = try StockTracking.parse(cost: "", quantity: "", upper: "13", lower: "", perShareCost: " ")
+        check(!clearedPerShare.hasPosition && clearedPerShare.hasAlerts, "清空每股成本与股数可以移除持仓并保留提醒")
+        let legacyAlongsidePerShare = try StockTracking.parse(cost: "10.123", quantity: "500", upper: "", lower: "", perShareCost: "10.12345678")
+        check(legacyAlongsidePerShare.perShareCostYuan == perShare.perShareCostYuan && legacyAlongsidePerShare.costPrice == perShare.costPrice,
+              "每股Decimal是权威来源，不使用legacy展示成本反算")
+
         let position = try StockTracking.parse(cost: " 10.50 ", quantity: " 200 ", upper: "", lower: "")
         check(position.hasPosition && !position.hasAlerts, "持仓可独立于提醒设置")
         check(position.costPrice == 10.5 && position.quantity == 200, "成本和股数去除首尾空白")
         let gain = position.profit(at: 11.55)!
-        check(abs(gain.amount - 210) < 0.00001 && abs(gain.percent - 10) < 0.00001, "正收益按股数计算金额和百分比")
+        check(abs(gain.amount - 210) < 0.00001 && abs(gain.percent! - 10) < 0.00001, "正收益按股数计算金额和百分比")
         let loss = position.profit(at: 9.45)!
-        check(abs(loss.amount + 210) < 0.00001 && abs(loss.percent + 10) < 0.00001, "负收益保留负号")
+        check(abs(loss.amount + 210) < 0.00001 && abs(loss.percent! + 10) < 0.00001, "负收益保留负号")
         check(position.profit(at: 10.5)?.amount == 0 && position.profit(at: 10.5)?.percent == 0, "现价等于成本时盈亏为零")
         for price in [Double.nan, .infinity, -1, 0] {
             check(position.profit(at: price) == nil, "非法现价不能生成盈亏")
@@ -61,7 +110,7 @@ enum TrackingTests {
         check(totalPosition.totalCostText == "5062.08", "总成本编辑预填保留分并去掉多余前导零")
         let preciseProfit = totalPosition.profit(at: 12)!
         check(preciseProfit.amount == Decimal(string: "937.92") && preciseProfit.amountText == "+937.92", "按总成本计算精确盈亏且不重复扣除费用")
-        check(abs(preciseProfit.percent - (937.92 / 5062.08 * 100)) < 0.00000001, "盈亏率分母使用精确总成本")
+        check(abs(preciseProfit.percent! - (937.92 / 5062.08 * 100)) < 0.00000001, "盈亏率分母使用精确总成本")
         let withoutAverage = StockTracking(quantity: 500, totalCostYuan: Decimal(string: "5062.08"))
         check(withoutAverage.hasPosition && withoutAverage.profit(at: 12)?.amountText == "+937.92", "已有总成本时不依赖展示均价计算盈亏")
         let validatedTotal = try withoutAverage.validated()
@@ -135,7 +184,7 @@ enum TrackingTests {
         check(roundedZero.profit(at: 1)?.amount == 0 && roundedZero.profit(at: 1)?.amountText == "+0.00", "小于半分钱的负值归零且不显示负零")
         let totalLoss = try StockTracking.parse(cost: "", quantity: "40", upper: "", lower: "", totalCost: "800.40")
         check(totalLoss.profit(at: 19)?.amountText == "-40.40", "总成本模式保留负盈亏的金额与负号")
-        check(abs(totalLoss.profit(at: 19)!.percent - (-40.40 / 800.40 * 100)) < 0.00000001, "负盈亏率同样按实际总成本计算")
+        check(abs(totalLoss.profit(at: 19)!.percent! - (-40.40 / 800.40 * 100)) < 0.00000001, "负盈亏率同样按实际总成本计算")
         let totalZero = try StockTracking.parse(cost: "", quantity: "500", upper: "", lower: "", totalCost: "5000")
         check(totalZero.profit(at: 10)?.amountText == "+0.00" && totalZero.profit(at: 10)?.percent == 0, "总成本等于市值时金额和盈亏率归零")
         let partialYuan = try StockTracking.parse(cost: "", quantity: "1", upper: "", lower: "", totalCost: ".50")

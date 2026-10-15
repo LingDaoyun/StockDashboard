@@ -47,8 +47,8 @@ cat > "$staging_app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>A股桌面行情</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundleShortVersionString</key><string>1.8.4</string>
-  <key>CFBundleVersion</key><string>24</string>
+  <key>CFBundleShortVersionString</key><string>1.8.5</string>
+  <key>CFBundleVersion</key><string>25</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
@@ -73,6 +73,12 @@ if ! mv "$staging_app" "$app_dir"; then
     exit 1
 fi
 if [[ -n "$backup_dir" ]]; then
-    print "旧构建备份：$backup_dir/A股桌面行情.app"
+    if ditto -c -k --sequesterRsrc --keepParent "$backup_dir/A股桌面行情.app" "${backup_dir}.zip"; then
+        rm -rf "$backup_dir"
+        print "旧构建压缩备份：${backup_dir}.zip"
+    else
+        rm -f "${backup_dir}.zip" || true
+        print -u2 "旧构建归档失败，已保留原 app：$backup_dir/A股桌面行情.app"
+    fi
 fi
 print "已生成：$app_dir"

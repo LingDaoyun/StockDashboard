@@ -1,13 +1,19 @@
 import SwiftUI
 
+private enum PositionEntryMode: String, CaseIterable {
+    case purchaseAmount = "买入金额"
+    case totalCost = "含费总成本"
+    case perShareCost = "每股成本"
+}
+
 struct TrackingEditor: View {
     let symbol: StockSymbol
     let configuration: StockTracking
     let notificationNotice: String?
-    let save: (String, String, String, String, Bool, String) throws -> Void
+    let save: (String, String, String, String, Bool, String, String) throws -> Void
     let rearm: () -> Void
     @State private var totalCost: String
-    @State private var estimateFees: Bool
+    @State private var entryMode: PositionEntryMode
     @State private var commissionRate: String
     @State private var quantity: String
     @State private var upper: String
@@ -16,7 +22,7 @@ struct TrackingEditor: View {
     @FocusState private var totalCostFocused: Bool
 
     init(symbol: StockSymbol, configuration: StockTracking, commissionRate: String, notificationNotice: String?,
-         save: @escaping (String, String, String, String, Bool, String) throws -> Void,
+         save: @escaping (String, String, String, String, Bool, String, String) throws -> Void,
          rearm: @escaping () -> Void) {
         self.symbol = symbol
         self.configuration = configuration
@@ -24,8 +30,8 @@ struct TrackingEditor: View {
         self.save = save
         self.rearm = rearm
         // A saved fee-inclusive cost must never become the ordinary purchase-amount input.
-        _totalCost = State(initialValue: configuration.purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "")
-        _estimateFees = State(initialValue: true)
+        _totalCost = State(initialValue: (configuration.perShareCostYuan ?? configuration.purchaseAmountYuan).map { NSDecimalNumber(decimal: $0).stringValue } ?? "")
+        _entryMode = State(initialValue: configuration.perShareCostYuan != nil ? .perShareCost : .purchaseAmount)
         _commissionRate = State(initialValue: configuration.purchaseCommissionRate.map { NSDecimalNumber(decimal: $0).stringValue } ?? commissionRate)
         _quantity = State(initialValue: configuration.quantity.map(String.init) ?? "")
         _upper = State(initialValue: configuration.upperPrice.map { String($0) } ?? "")
@@ -34,29 +40,23 @@ struct TrackingEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(estimateFees ? "买入金额自动加费" : "含费总成本 · 不再加费")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(estimateFees ? Color.secondary : Color.orange)
-                Spacer(minLength: 2)
-                Button(estimateFees ? "校准含费总成本" : "返回买入金额") {
-                    estimateFees.toggle()
-                    totalCost = estimateFees
-                        ? configuration.purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""
-                        : configuration.totalCostText
-                    error = nil
+            Picker("持仓输入方式", selection: $entryMode) {
+                ForEach(PositionEntryMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
                 }
-                .buttonStyle(.borderless).font(.system(size: 10))
-                .accessibilityLabel("\(symbol.code)\(estimateFees ? "校准含费总成本" : "返回买入金额")")
             }
+            .pickerStyle(.segmented).labelsHidden()
+            .accessibilityLabel("\(symbol.code)持仓输入方式")
             .frame(height: 20)
             HStack(spacing: 12) {
-                field(estimateFees ? "买入金额 · 不含费/元" : "总成本 · 已含费/元", placeholder: "未设置", text: $totalCost,
-                      label: estimateFees ? "买入成交金额" : "持仓总成本")
+                field(entryMode == .perShareCost ? "每股成本 · 元" : estimateFees ? "买入金额 · 不含费/元" : "总成本 · 已含费/元",
+                      placeholder: "未设置", text: $totalCost,
+                      label: entryMode == .perShareCost ? "每股持仓成本" : estimateFees ? "买入成交金额" : "持仓总成本")
                     .focused($totalCostFocused)
-                    .help(estimateFees ? "输入单笔买入委托的成交金额，不含手续费；费用自动预估"
+                    .help(entryMode == .perShareCost ? "输入券商做T后的当前每股成本，已含费用；最多8位小数，可为0或负数"
+                          : estimateFees ? "输入单笔买入委托的成交金额，不含手续费；费用自动预估"
                           : "输入持仓对应的买入金额加已发生费用；不再另外扣费")
-                field("持仓 · 股", placeholder: "未设置", text: $quantity, label: "持仓股数")
+                field("当前数量 · 股", placeholder: "未设置", text: $quantity, label: "持仓股数")
             }
             HStack(spacing: 12) {
                 field("上方提醒 · ≥", placeholder: "留空关闭", text: $upper, label: "上方提醒价")
@@ -74,12 +74,12 @@ struct TrackingEditor: View {
                         .font(.system(size: 10)).monospacedDigit().foregroundStyle(.orange)
                 }
             } else {
-                Text("按实际含费总成本计算，不再另外扣费")
+                Text(entryMode == .perShareCost ? "按当前每股成本和数量计算，不再加费" : "按实际含费总成本计算，不再另外扣费")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading).frame(height: 20)
             }
             HStack {
-                Button(estimateFees ? "保存" : "保存总成本", action: saveValues)
+                Button(entryMode == .perShareCost ? "保存成本" : estimateFees ? "保存" : "保存总成本", action: saveValues)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityLabel("保存\(symbol.code)持仓和提醒")
@@ -99,6 +99,15 @@ struct TrackingEditor: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .onAppear { totalCostFocused = true }
+        .onChange(of: entryMode) { mode in
+            switch mode {
+            case .purchaseAmount: totalCost = configuration.purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""
+            case .totalCost: totalCost = configuration.totalCostText
+            case .perShareCost: totalCost = configuration.perShareCostYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""
+            }
+            error = nil
+            totalCostFocused = true
+        }
     }
 
     private func field(_ title: String, placeholder: String, text: Binding<String>, label: String) -> some View {
@@ -113,21 +122,31 @@ struct TrackingEditor: View {
     }
 
     private func saveValues() {
-        do { try save(totalCost, quantity, upper, lower, estimateFees, commissionRate); error = nil }
+        do {
+            try save(entryMode == .perShareCost ? "" : totalCost, quantity, upper, lower, estimateFees, commissionRate,
+                     entryMode == .perShareCost ? totalCost : "")
+            error = nil
+        }
         catch { self.error = error.localizedDescription }
     }
+
+    private var estimateFees: Bool { entryMode == .purchaseAmount }
 
     private var feeEstimate: BuyFeeEstimate? {
         try? BuyFeeEstimate.calculate(amount: totalCost, commissionRate: commissionRate, symbol: symbol)
     }
 
     private var entryNotice: String {
+        if entryMode == .perShareCost { return "填写券商做T后的每股成本；成本≤0时仅显示盈亏金额，盈亏率为—。" }
         if !estimateFees { return "仅填写已含手续费的总成本；保存后不额外加费。" }
         if configuration.purchaseAmountYuan != nil && configuration.purchaseCommissionRate == nil {
             return "旧费率未记录；仅改提醒保留原成本\(configuration.totalCostText)元，修改买入字段才按当前费率重算。"
         }
         if let feeEstimate {
             return "含费成本\(feeEstimate.totalCostText)元；按单笔预估，实际以交割单为准。"
+        }
+        if let perShareCost = configuration.perShareCostYuan {
+            return "已保存每股成本\(NSDecimalNumber(decimal: perShareCost).stringValue)元；修改持仓请填买入金额，仅改提醒可直接保存。"
         }
         if configuration.hasPosition && configuration.purchaseAmountYuan == nil {
             let costLabel = configuration.totalCostYuan == nil ? "原总成本估算" : "已保存总成本"

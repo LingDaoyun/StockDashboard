@@ -132,7 +132,7 @@ final class QuoteStore: ObservableObject {
     var totalPositionProfit: Decimal? {
         guard trackingStorageNotice == nil, !invalidTracking.values.contains(where: {
             $0.costPrice != nil || $0.totalCostYuan != nil || $0.quantity != nil
-                || $0.purchaseAmountYuan != nil || $0.purchaseCommissionRate != nil
+                || $0.purchaseAmountYuan != nil || $0.purchaseCommissionRate != nil || $0.perShareCostYuan != nil
         }) else { return nil }
         var total = Decimal.zero
         for symbol in symbols {
@@ -158,13 +158,13 @@ final class QuoteStore: ObservableObject {
 
     func saveTracking(for symbol: StockSymbol, cost: String, quantity: String, upper: String, lower: String,
                       totalCost: String = "", purchaseAmount: String = "", purchaseCommissionRate: Decimal? = nil,
-                      now: Date = Date()) throws {
+                      perShareCost: String = "", now: Date = Date()) throws {
         guard symbols.contains(symbol) else {
             throw NSError(domain: "StockTracking", code: 1, userInfo: [NSLocalizedDescriptionKey: "股票已移除，请重新添加。"])
         }
         var value = try StockTracking.parse(cost: cost, quantity: quantity, upper: upper, lower: lower,
                                            totalCost: totalCost, purchaseAmount: purchaseAmount,
-                                           purchaseCommissionRate: purchaseCommissionRate)
+                                           purchaseCommissionRate: purchaseCommissionRate, perShareCost: perShareCost)
         let previous = tracking[symbol.id] ?? invalidTracking[symbol.id]
         value.upperTriggered = value.upperPrice != nil && value.upperPrice == previous?.upperPrice && previous?.upperTriggered == true
         value.lowerTriggered = value.lowerPrice != nil && value.lowerPrice == previous?.lowerPrice && previous?.lowerTriggered == true
@@ -179,8 +179,16 @@ final class QuoteStore: ObservableObject {
     }
 
     func savePosition(for symbol: StockSymbol, amount: String, quantity: String, upper: String, lower: String,
-                      estimateFees: Bool, commissionRate: String, now: Date = Date()) throws {
+                      estimateFees: Bool, commissionRate: String, perShareCost: String = "", now: Date = Date()) throws {
         let amountText = amount.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !perShareCost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard !estimateFees, amountText.isEmpty else {
+                throw TrackingError.invalidInput("每股成本和买入金额请选择一种输入方式，不可混用。")
+            }
+            try saveTracking(for: symbol, cost: "", quantity: quantity, upper: upper, lower: lower,
+                             perShareCost: perShareCost, now: now)
+            return
+        }
         // Unchanged purchase inputs mean an alert edit, including older estimates with no saved rate.
         if estimateFees, let existing = tracking[symbol.id], existing.hasPosition,
            let existingQuantity = existing.quantity,
@@ -192,7 +200,8 @@ final class QuoteStore: ObservableObject {
                              quantity: quantity, upper: upper, lower: lower,
                              totalCost: existing.totalCostYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "",
                              purchaseAmount: existing.purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "",
-                             purchaseCommissionRate: existing.purchaseCommissionRate, now: now)
+                             purchaseCommissionRate: existing.purchaseCommissionRate,
+                             perShareCost: existing.perShareCostYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "", now: now)
             return
         }
         if estimateFees && !amountText.isEmpty {
@@ -452,7 +461,7 @@ struct QuoteRow: View {
     let notificationNotice: String?
     let commissionRate: String
     let configure: () -> Void
-    let save: (String, String, String, String, Bool, String) throws -> Void
+    let save: (String, String, String, String, Bool, String, String) throws -> Void
     let rearm: () -> Void
     let remove: () -> Void
 
@@ -547,16 +556,20 @@ struct QuoteRow: View {
             if configuration.hasPosition {
                 HStack(spacing: 10) {
                     metric("成本", value: configuration.costPrice.map { String(format: "%.3f", $0) } ?? "—")
-                        .help(configuration.totalCostYuan != nil
+                        .help(configuration.perShareCostYuan.map {
+                            "当前\(configuration.quantity ?? 0)股；每股成本\(NSDecimalNumber(decimal: $0).stringValue)元；按做T后成本计算，不再加费"
+                        } ?? (configuration.totalCostYuan != nil
                               ? "\(configuration.quantity ?? 0)股；含费总成本\(configuration.totalCostText)元；单股成本自动计算"
-                              : "\(configuration.quantity ?? 0)股；原手动成本，总成本\(configuration.totalCostText)元为估算")
+                              : "\(configuration.quantity ?? 0)股；原手动成本，总成本\(configuration.totalCostText)元为估算"))
                     metric("浮盈亏", value: profit?.amountText ?? "—")
                         .foregroundStyle(profitColor)
-                    metric("盈亏率", value: profit.map { String(format: "%+.2f%%", $0.percent) } ?? "—")
+                    metric("盈亏率", value: profit.flatMap(\.percent).map { String(format: "%+.2f%%", $0) } ?? "—")
                         .foregroundStyle(profitColor)
                 }
                 .font(.system(size: 10)).lineLimit(1).foregroundStyle(.secondary)
-                .help(configuration.purchaseAmountYuan != nil
+                .help(configuration.perShareCostYuan != nil
+                      ? "盈亏＝（最新可用报价−当前每股成本）×当前数量；不再另扣手续费。每股成本请按券商做T后的值更新，显示舍入可能与券商有差异。"
+                      : configuration.purchaseAmountYuan != nil
                       ? "费用按单笔买入委托及设置的佣金率预估；费用落账后可切换为实际含费总成本"
                       : configuration.totalCostYuan != nil
                       ? "浮盈亏＝最新可用报价×持仓股数−含费总成本；不再另扣手续费"
@@ -782,9 +795,9 @@ struct WidgetView: View {
                                      notificationNotice: store.notificationNotice,
                                      commissionRate: store.buyCommissionRate,
                                      configure: { configure(symbol) },
-                                     save: { amount, quantity, upper, lower, estimateFees, commissionRate in
+                                     save: { amount, quantity, upper, lower, estimateFees, commissionRate, perShareCost in
                                          try store.savePosition(for: symbol, amount: amount, quantity: quantity, upper: upper, lower: lower,
-                                                                estimateFees: estimateFees, commissionRate: commissionRate)
+                                                                estimateFees: estimateFees, commissionRate: commissionRate, perShareCost: perShareCost)
                                          store.expandedSymbolID = nil
                                      },
                                      rearm: { store.rearmAlerts(for: symbol) },

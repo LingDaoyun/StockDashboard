@@ -23,6 +23,7 @@ if [[ -L "$installed_app" ]] || { [[ -e "$installed_app" ]] && \
 fi
 
 # 内容相同可重复启用；更新前要求正常退出，避免运行旧版本。
+backup_dir=""
 if [[ ! -d "$installed_app" ]] || ! /usr/bin/diff -qr "$source_app" "$installed_app" >/dev/null; then
     if /usr/bin/pgrep -x AShareDesktop >/dev/null; then
         print -u2 "请先从 A股桌面行情 菜单选择退出，再运行本脚本。"
@@ -32,11 +33,9 @@ if [[ ! -d "$installed_app" ]] || ! /usr/bin/diff -qr "$source_app" "$installed_
     staging_dir="$(mktemp -d "$apps_dir/.AShareDesktop-install.XXXXXX")"
     trap 'rm -rf "$staging_dir"' EXIT
     /usr/bin/ditto "$source_app" "$staging_dir/A股桌面行情.app"
-    backup_dir=""
     if [[ -e "$installed_app" ]]; then
         backup_dir="$(mktemp -d "$apps_dir/.AShareDesktop-backup.XXXXXX")"
         mv "$installed_app" "$backup_dir/A股桌面行情.app"
-        print "旧版本备份：$backup_dir/A股桌面行情.app"
     fi
     if ! mv "$staging_dir/A股桌面行情.app" "$installed_app"; then
         if [[ -n "$backup_dir" ]]; then
@@ -64,6 +63,15 @@ fi
 mv "$temporary_plist" "$launch_plist"
 /bin/launchctl enable "$gui_domain/$label"
 /bin/launchctl bootstrap "$gui_domain" "$launch_plist"
+if [[ -n "$backup_dir" ]]; then
+    if ditto -c -k --sequesterRsrc --keepParent "$backup_dir/A股桌面行情.app" "${backup_dir}.zip"; then
+        rm -rf "$backup_dir"
+        print "旧版本压缩备份：${backup_dir}.zip"
+    else
+        rm -f "${backup_dir}.zip" || true
+        print -u2 "旧版本归档失败，已保留原 app：$backup_dir/A股桌面行情.app"
+    fi
+fi
 print "已安装并启用当前用户登录自启动：$installed_app"
 print "启动项：$launch_plist"
 print "未执行整机重启；登录启动通过当前用户 LaunchAgent 配置。"

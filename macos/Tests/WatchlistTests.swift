@@ -382,6 +382,59 @@ struct WatchlistTests {
                   && wideReloaded.tracking[primary.id]?.armedAt == wideRecord.armedAt,
                   "仅修改持仓不能重置超Decimal范围的旧提醒状态")
         }
+        let perShareDomain = "cn.local.AShareDesktop.per-share-tests.\(UUID().uuidString)"
+        let perShareDefaults = UserDefaults(suiteName: perShareDomain)!
+        defer { perShareDefaults.removePersistentDomain(forName: perShareDomain) }
+        let perShareStore = QuoteStore(defaults: perShareDefaults, preview: nil, clock: { Date(timeIntervalSince1970: 101) })
+        perShareStore.suspend()
+        try perShareStore.addSymbols("600108")
+        try perShareStore.savePosition(for: primary, amount: "", quantity: "500", upper: "13", lower: "9",
+                                       estimateFees: false, commissionRate: "abc", perShareCost: "10.12345678")
+        let perSharePosition = perShareStore.tracking[primary.id]!
+        check(perSharePosition.perShareCostYuan == Decimal(string: "10.12345678")
+              && perSharePosition.totalCostYuan == nil && perSharePosition.purchaseAmountYuan == nil,
+              "每股成本保存完整精度，不套用买入金额和费用字段")
+        check(perSharePosition.profit(at: 12)?.amountText == "+938.27" && perShareStore.buyCommissionRate == "2.5",
+              "每股成本算盈亏不重复加费，也不校验或改写佣金设置")
+        perShareStore.receive([primary.id: marketQuote(primary, 12, 100)], requested: perShareStore.symbols, at: Date(timeIntervalSince1970: 101))
+        check(perShareStore.totalPositionProfit == Decimal(string: "938.27"), "每股成本盈亏参与底栏合计")
+        let perShareReloaded = QuoteStore(defaults: perShareDefaults, preview: nil)
+        perShareReloaded.suspend()
+        check(perShareReloaded.tracking[primary.id] == perSharePosition, "重启保留每股成本完整精度和输入来源")
+        try perShareStore.savePosition(for: primary, amount: "", quantity: "500", upper: "14", lower: "9",
+                                       estimateFees: true, commissionRate: "abc")
+        check(perShareStore.tracking[primary.id]?.perShareCostYuan == perSharePosition.perShareCostYuan,
+              "旧入口仅修改提醒仍保留每股成本，不转换为预估费用")
+        try perShareStore.savePosition(for: primary, amount: "", quantity: "200", upper: "14", lower: "9",
+                                       estimateFees: false, commissionRate: "abc", perShareCost: "-0.12345678")
+        check(perShareStore.totalPositionProfit == Decimal(string: "2424.69")
+              && perShareStore.tracking[primary.id]?.profit(at: 12)?.percent == nil,
+              "做T后负成本仍有金额和合计，盈亏率显示不可用")
+        try perShareStore.savePosition(for: primary, amount: "", quantity: "200", upper: "14", lower: "9",
+                                       estimateFees: false, commissionRate: "abc", perShareCost: "0")
+        check(perShareStore.totalPositionProfit == 2400 && perShareStore.tracking[primary.id]?.profit(at: 12)?.percent == nil,
+              "零成本不因除零导致持仓与总盈亏消失")
+        let beforeInvalidPerShare = perShareStore.tracking[primary.id]
+        rejects({ try perShareStore.savePosition(for: primary, amount: "1000", quantity: "200", upper: "14", lower: "9",
+                                                 estimateFees: true, commissionRate: "2.5", perShareCost: "10") },
+                "每股成本不能与买入金额或自动费用混用")
+        check(perShareStore.tracking[primary.id] == beforeInvalidPerShare, "拒绝输入后持仓不变")
+        try perShareStore.savePosition(for: primary, amount: "1005", quantity: "100", upper: "14", lower: "9",
+                                       estimateFees: false, commissionRate: "abc")
+        check(perShareStore.tracking[primary.id]?.perShareCostYuan == nil && perShareStore.totalPositionProfit == 195,
+              "切回含费总成本会清除每股来源且不重复扣费")
+        try perShareStore.savePosition(for: primary, amount: "1000", quantity: "100", upper: "14", lower: "9",
+                                       estimateFees: true, commissionRate: "2.5")
+        check(perShareStore.tracking[primary.id]?.perShareCostYuan == nil && perShareStore.tracking[primary.id]?.purchaseAmountYuan == 1000,
+              "切回买入金额仍正常预估费用")
+        try perShareStore.savePosition(for: primary, amount: "", quantity: "", upper: "14", lower: "9",
+                                       estimateFees: false, commissionRate: "abc")
+        check(perShareStore.tracking[primary.id]?.hasPosition == false && perShareStore.totalPositionProfit == 0,
+              "清空当前数量和成本后不参与总额，提醒仍保留")
+        perShareDefaults.set(Data(#"{"sh600108":{"perShareCostYuan":1,"upperTriggered":false,"lowerTriggered":false}}"#.utf8), forKey: "stockTracking")
+        let invalidPerShareStore = QuoteStore(defaults: perShareDefaults, preview: nil)
+        invalidPerShareStore.suspend()
+        check(invalidPerShareStore.totalPositionProfit == nil, "缺股数的每股成本配置不能被遗漏后显示零合计")
         print("PASS: \(count) watchlist assertions")
         print("PASS: \(try runTotalProfitTests()) total-profit assertions")
         print("PASS: \(try runRefreshTests()) refresh assertions")

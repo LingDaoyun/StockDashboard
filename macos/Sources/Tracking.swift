@@ -4,6 +4,7 @@ struct StockTracking: Codable, Equatable {
     var costPrice: Double?
     var quantity: Int?
     var totalCostYuan: Decimal?
+    var perShareCostYuan: Decimal?
     var purchaseAmountYuan: Decimal?
     var purchaseCommissionRate: Decimal?
     var upperPrice: Double?
@@ -16,10 +17,11 @@ struct StockTracking: Codable, Equatable {
          upperPrice: Double? = nil, lowerPrice: Double? = nil,
          upperTriggered: Bool = false, lowerTriggered: Bool = false,
          armedAt: Date? = nil, totalCostYuan: Decimal? = nil, purchaseAmountYuan: Decimal? = nil,
-         purchaseCommissionRate: Decimal? = nil) {
+         purchaseCommissionRate: Decimal? = nil, perShareCostYuan: Decimal? = nil) {
         self.costPrice = costPrice
         self.quantity = quantity
         self.totalCostYuan = totalCostYuan
+        self.perShareCostYuan = perShareCostYuan
         self.purchaseAmountYuan = purchaseAmountYuan
         self.purchaseCommissionRate = purchaseCommissionRate
         self.upperPrice = upperPrice
@@ -29,7 +31,7 @@ struct StockTracking: Codable, Equatable {
         self.armedAt = armedAt
     }
 
-    var hasPosition: Bool { (costPrice != nil || totalCostYuan != nil) && quantity != nil }
+    var hasPosition: Bool { (costPrice != nil || totalCostYuan != nil || perShareCostYuan != nil) && quantity != nil }
     var hasAlerts: Bool { upperPrice != nil || lowerPrice != nil }
     var hasTriggeredAlerts: Bool { upperTriggered || lowerTriggered }
 
@@ -37,12 +39,16 @@ struct StockTracking: Codable, Equatable {
         effectiveCostYuan.map { yuanText($0, showSign: false) } ?? ""
     }
 
-    static func parse(cost: String, quantity: String, upper: String, lower: String, totalCost: String = "", purchaseAmount: String = "", purchaseCommissionRate: Decimal? = nil) throws -> StockTracking {
+    static func parse(cost: String, quantity: String, upper: String, lower: String, totalCost: String = "", purchaseAmount: String = "", purchaseCommissionRate: Decimal? = nil, perShareCost: String = "") throws -> StockTracking {
         let costText = cost.trimmingCharacters(in: .whitespacesAndNewlines)
         let quantityText = quantity.trimmingCharacters(in: .whitespacesAndNewlines)
-        var costPrice = try price(costText, label: "成本价")
+        let perShareCostYuan = try perShareCostAmount(perShareCost)
+        var costPrice = perShareCostYuan == nil ? try price(costText, label: "成本价") : nil
         let totalCostYuan = try totalCostAmount(totalCost)
         let purchaseAmountYuan = try totalCostAmount(purchaseAmount, label: "成交金额")
+        guard perShareCostYuan == nil || (totalCostYuan == nil && purchaseAmountYuan == nil && purchaseCommissionRate == nil) else {
+            throw TrackingError.invalidInput("每股成本和买入金额、持仓总成本不能同时填写。")
+        }
         var quantityValue: Int?
         if !quantityText.isEmpty {
             guard quantityText.utf8.allSatisfy({ (48...57).contains($0) }),
@@ -54,7 +60,7 @@ struct StockTracking: Codable, Equatable {
                 throw TrackingError.invalidInput("总成本过大，请检查成本价和持仓股数。")
             }
         }
-        guard (costPrice != nil || totalCostYuan != nil) == (quantityValue != nil) else {
+        guard (costPrice != nil || totalCostYuan != nil || perShareCostYuan != nil) == (quantityValue != nil) else {
             throw TrackingError.invalidInput("持仓总成本和持仓股数需同时填写，或同时留空。")
         }
         if let purchaseAmountYuan {
@@ -75,6 +81,12 @@ struct StockTracking: Codable, Equatable {
             }
             costPrice = average
         }
+        if let perShareCostYuan, let quantityValue {
+            guard precisePerShareTotal(perShareCostYuan, quantity: quantityValue) != nil else {
+                throw TrackingError.invalidInput("每股成本乘持仓股数过大或无法精确保存，请检查输入。")
+            }
+            costPrice = NSDecimalNumber(decimal: perShareCostYuan).doubleValue
+        }
         let upperPrice = try price(upper, label: "上方提醒价")
         let lowerPrice = try price(lower, label: "下方提醒价")
         if let upperPrice, let lowerPrice, lowerPrice >= upperPrice {
@@ -83,7 +95,7 @@ struct StockTracking: Codable, Equatable {
         return StockTracking(costPrice: costPrice, quantity: quantityValue,
                              upperPrice: upperPrice, lowerPrice: lowerPrice,
                              totalCostYuan: totalCostYuan, purchaseAmountYuan: purchaseAmountYuan,
-                             purchaseCommissionRate: purchaseCommissionRate)
+                             purchaseCommissionRate: purchaseCommissionRate, perShareCostYuan: perShareCostYuan)
     }
 
     func validated() throws -> StockTracking {
@@ -93,7 +105,8 @@ struct StockTracking: Codable, Equatable {
                                    lower: lowerPrice.map { String($0) } ?? "",
                                    totalCost: totalCostYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "",
                                    purchaseAmount: purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "",
-                                   purchaseCommissionRate: purchaseCommissionRate)
+                                   purchaseCommissionRate: purchaseCommissionRate,
+                                   perShareCost: perShareCostYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "")
         value.upperTriggered = value.upperPrice != nil && upperTriggered
         value.lowerTriggered = value.lowerPrice != nil && lowerTriggered
         value.armedAt = value.hasAlerts ? armedAt : nil
@@ -111,13 +124,18 @@ struct StockTracking: Codable, Equatable {
         guard NSDecimalSubtract(&unroundedAmount, &value, &cost, .plain) == .noError else { return nil }
         var amount = Decimal()
         NSDecimalRound(&amount, &unroundedAmount, 2, .plain)
-        let percent = NSDecimalNumber(decimal: (unroundedAmount / cost) * 100).doubleValue
-        guard !amount.isNaN, percent.isFinite else { return nil }
+        let percent = cost > 0 ? NSDecimalNumber(decimal: (unroundedAmount / cost) * 100).doubleValue : nil
+        guard !amount.isNaN, percent?.isFinite ?? true else { return nil }
         return PositionProfit(amount: amount, percent: percent)
     }
 
     private var effectiveCostYuan: Decimal? {
         guard let quantity, quantity > 0 else { return nil }
+        if let perShareCostYuan {
+            guard totalCostYuan == nil, purchaseAmountYuan == nil, purchaseCommissionRate == nil,
+                  (try? Self.perShareCostAmount(NSDecimalNumber(decimal: perShareCostYuan).stringValue)) == perShareCostYuan else { return nil }
+            return Self.precisePerShareTotal(perShareCostYuan, quantity: quantity)
+        }
         if let totalCostYuan {
             guard (try? Self.totalCostAmount(NSDecimalNumber(decimal: totalCostYuan).stringValue)) == totalCostYuan else { return nil }
             return totalCostYuan
@@ -180,11 +198,42 @@ struct StockTracking: Codable, Equatable {
         }
         return value
     }
+
+    private static func perShareCostAmount(_ text: String) throws -> Decimal? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let pattern = #"^-?(?:[0-9]+(?:\.[0-9]{1,8})?|\.[0-9]{1,8})$"#
+        guard let range = trimmed.range(of: pattern, options: .regularExpression),
+              range == trimmed.startIndex..<trimmed.endIndex,
+              let value = Decimal(string: trimmed, locale: Locale(identifier: "en_US_POSIX")), !value.isNaN else {
+            throw TrackingError.invalidInput("每股成本请输入最多8位小数的有效价格，允许0或负成本，不支持科学记数法。")
+        }
+        let magnitude = trimmed.hasPrefix("-") ? String(trimmed.dropFirst()) : trimmed
+        let parts = magnitude.split(separator: ".", omittingEmptySubsequences: false)
+        let integer = String(parts[0].drop(while: { $0 == "0" }))
+        let fraction = parts.count > 1 ? String(parts[1].reversed().drop(while: { $0 == "0" }).reversed()) : ""
+        let canonical = (value < 0 ? "-" : "") + (integer.isEmpty ? "0" : integer) + (fraction.isEmpty ? "" : "." + fraction)
+        guard NSDecimalNumber(decimal: value).stringValue == canonical else {
+            throw TrackingError.invalidInput("每股成本过大，无法精确保存，请检查输入。")
+        }
+        return value
+    }
+
+    private static func precisePerShareTotal(_ cost: Decimal, quantity: Int) -> Decimal? {
+        var cost = cost
+        var shares = Decimal(quantity)
+        var total = Decimal()
+        var restoredCost = Decimal()
+        guard NSDecimalMultiply(&total, &cost, &shares, .plain) == .noError,
+              NSDecimalDivide(&restoredCost, &total, &shares, .plain) == .noError,
+              restoredCost == cost else { return nil }
+        return total
+    }
 }
 
 struct PositionProfit {
     let amount: Decimal
-    let percent: Double
+    let percent: Double?
 
     var amountText: String { yuanText(amount, showSign: true) }
 }
