@@ -14,6 +14,9 @@ final class QuoteStore: ObservableObject {
     @Published private(set) var lastReceipt: Date?
     @Published private(set) var errorMessage: String?
     @Published private(set) var isRefreshing = false
+    @Published private(set) var marketOverview: MarketOverviewSnapshot?
+    @Published private(set) var marketError: String?
+    @Published private(set) var isMarketRefreshing = false
     @Published private(set) var marketNow: Date
     @Published var isAddingStock = false
     @Published var isAdjustingTransparency = false
@@ -40,10 +43,13 @@ final class QuoteStore: ObservableObject {
     let isPreview: Bool
     private var timer: Timer?
     private var request: Task<Void, Never>?
+    private var marketRequest: Task<Void, Never>?
+    private var lastMarketAttempt: Date?
     private var activity: NSObjectProtocol?
     private var suspended = false
     private var started = false
     private let client: QuoteClient
+    private let marketClient: (any MarketOverviewFetching)?
     private let clock: () -> Date
     private var undecodableTracking: [String: TrackingJSONValue] = [:]
     private var backedUpCorruptTracking = false
@@ -79,8 +85,9 @@ final class QuoteStore: ObservableObject {
     }
 
     init(defaults: UserDefaults, preview: String?, client: QuoteClient = QuoteClient(),
-         clock: @escaping () -> Date = Date.init) {
+         marketClient: (any MarketOverviewFetching)? = nil, clock: @escaping () -> Date = Date.init) {
         self.client = client
+        self.marketClient = marketClient
         self.clock = clock
         self.marketNow = clock()
         self.defaults = defaults
@@ -275,10 +282,11 @@ final class QuoteStore: ObservableObject {
     private func scheduleNextTick() {
         timer?.invalidate()
         timer = nil
-        guard started, !suspended, !symbols.isEmpty else { return }
+        guard started, !suspended, !symbols.isEmpty || marketClient != nil else { return }
         let now = clock()
         let session = MarketClock.session(at: now)
-        let delay = max(0.01, min(session.pollInterval, session.nextChange.timeIntervalSince(now)))
+        let interval = symbols.isEmpty ? max(3, session.pollInterval) : session.pollInterval
+        let delay = max(0.01, min(interval, session.nextChange.timeIntervalSince(now)))
         let next = Timer(timeInterval: delay, repeats: false) { [weak self] fired in
             Task { @MainActor in
                 guard let self, self.timer === fired, self.started, !self.suspended else { return }
@@ -339,6 +347,10 @@ final class QuoteStore: ObservableObject {
         request?.cancel()
         request = nil
         isRefreshing = false
+        marketRequest?.cancel()
+        marketRequest = nil
+        isMarketRefreshing = false
+        lastMarketAttempt = nil
         updateActivity()
     }
 
@@ -355,7 +367,7 @@ final class QuoteStore: ObservableObject {
     }
 
     private func updateActivity() {
-        let needsActivity = started && !symbols.isEmpty && !suspended && marketSession.pollInterval == 1
+        let needsActivity = started && (!symbols.isEmpty || marketClient != nil) && !suspended && marketSession.pollInterval == 1
         if !needsActivity, let activity {
             ProcessInfo.processInfo.endActivity(activity)
             self.activity = nil
@@ -367,9 +379,10 @@ final class QuoteStore: ObservableObject {
         }
     }
 
-    func refresh() {
+    func refresh(forceMarket: Bool = false) {
         marketNow = clock()
         updateActivity()
+        refreshMarket(force: forceMarket)
         guard !suspended, !symbols.isEmpty, !isRefreshing else { return }
         let requested = symbols
         isRefreshing = true
@@ -401,6 +414,38 @@ final class QuoteStore: ObservableObject {
             }
             isRefreshing = false
             request = nil
+        }
+    }
+
+    private func refreshMarket(force: Bool) {
+        guard !suspended, let marketClient, !isMarketRefreshing else { return }
+        let now = marketNow
+        if !force, let lastMarketAttempt, now >= lastMarketAttempt,
+           now.timeIntervalSince(lastMarketAttempt) < max(3, marketSession.pollInterval) { return }
+        lastMarketAttempt = now
+        isMarketRefreshing = true
+        marketRequest = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if !Task.isCancelled { self.isMarketRefreshing = false; self.marketRequest = nil }
+            }
+            do {
+                let incoming = try await marketClient.fetch()
+                guard !Task.isCancelled else { return }
+                let receipt = self.clock()
+                guard incoming.index.timestamp <= receipt.addingTimeInterval(5),
+                      incoming.market.breadthTimestamp <= receipt.addingTimeInterval(5),
+                      incoming.market.turnoverTimestamp <= receipt.addingTimeInterval(5),
+                      self.marketOverview.map({ incoming.index.timestamp >= $0.index.timestamp && incoming.market.breadthTimestamp >= $0.market.breadthTimestamp && incoming.market.turnoverTimestamp >= $0.market.turnoverTimestamp }) ?? true else {
+                    self.marketError = "大盘源时间异常，保留上次数据并自动重试"
+                    return
+                }
+                self.marketOverview = incoming
+                self.marketError = nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.marketError = error.localizedDescription
+            }
         }
     }
 
@@ -641,12 +686,21 @@ struct WidgetView: View {
         store.oldestQuoteTime.map { MarketClock.ageText(since: $0, at: store.marketNow) }
     }
     private var statusColor: Color {
+        if store.symbols.isEmpty, additionError == nil {
+            if store.marketError != nil { return .orange }
+            guard let snapshot = store.marketOverview else { return .secondary }
+            if MarketClock.isStale(timestamp: min(snapshot.index.timestamp, snapshot.market.timestamp), at: store.marketNow, session: store.marketSession) { return .orange }
+            return store.marketSession.expectsFreshQuotes ? .green : .secondary
+        }
         if additionError != nil || store.errorMessage != nil || !store.unavailable.isEmpty ||
             !store.invalidTracking.isEmpty || store.trackingStorageNotice != nil ||
             store.hasStaleQuotes || store.missingAuctionPrice || !store.marketSession.calendarKnown { return .orange }
         return store.oldestQuoteTime != nil && store.marketSession.expectsFreshQuotes ? .green : .secondary
     }
     private var statusHelp: String {
+        if store.symbols.isEmpty {
+            return (store.marketError.map { $0 + "\n" } ?? "") + "上证指数来自腾讯；全A统计来自同花顺沪深京A股。交易时段大盘每3秒请求，午休30秒、休市60秒；源时间和昨日同刻口径可悬停顶部大盘区域查看。"
+        }
         let sourceTime = store.oldestQuoteTime.map { DisplayFormat.chinaTime.string(from: $0) } ?? "—"
         let receiptTime = store.lastReceipt.map { DisplayFormat.chinaTime.string(from: $0) } ?? "—"
         let issue = additionError ?? store.trackingStorageNotice ?? store.errorMessage
@@ -659,7 +713,14 @@ struct WidgetView: View {
         if let additionError { return additionError }
         if isSearching { return "正在搜索股票…" }
         if let notice = store.trackingStorageNotice { return notice }
-        if store.symbols.isEmpty { return "添加股票后，按交易时段自动刷新" }
+        if store.symbols.isEmpty {
+            if store.marketError != nil { return "大盘连接失败 · 自动重试" }
+            if let market = store.marketOverview {
+                let age = MarketClock.ageText(since: min(market.index.timestamp, market.market.timestamp), at: store.marketNow)
+                return "\(store.marketSession.label) · \(age) · \(Int(max(3, store.marketSession.pollInterval)))秒刷新"
+            }
+            return "正在连接大盘行情…"
+        }
         if store.errorMessage != nil {
             return quoteAge.map { "连接失败 · \($0) · 自动重试" }
                 ?? "连接失败 · 自动重试"
@@ -764,6 +825,8 @@ struct WidgetView: View {
             .frame(height: 48)
             .zIndex(1)
             Divider().opacity(0.6)
+            MarketOverviewView(snapshot: store.marketOverview, notice: store.marketError, now: store.marketNow)
+            Divider().opacity(0.6)
             if store.symbols.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "plus.square.dashed")
@@ -824,11 +887,11 @@ struct WidgetView: View {
                     .minimumScaleFactor(0.8)
                     .layoutPriority(1)
                     .help("单位：元。合计已填写持仓的股票，按各卡片当前显示价格计算；竞价时买一优先、卖一兜底，仅作参考。无持仓不计入；缺少持仓估值价或配置异常时显示—。总成本已含费用，不重复扣费。")
-                Button(action: { store.refresh() }) {
+                Button(action: { store.refresh(forceMarket: true) }) {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)
-                .disabled(store.isRefreshing || store.symbols.isEmpty)
+                .disabled(store.isRefreshing || store.isMarketRefreshing)
                 .help("立即刷新")
             }
             .font(.system(size: 10))
@@ -965,7 +1028,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             previewDomain = domain
             defaults = UserDefaults(suiteName: domain)!
         } else { defaults = .standard }
-        store = QuoteStore(defaults: defaults, preview: preview)
+        store = QuoteStore(defaults: defaults, preview: preview, marketClient: MarketOverviewClient())
         if !store.isPreview {
             notificationCenter = UNUserNotificationCenter.current()
             notificationCenter?.delegate = self
@@ -1127,7 +1190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     private func resizePanel() {
         guard panel != nil else { return }
         let rowsHeight = store.listHeight
-        let size = NSSize(width: 370, height: 81 + rowsHeight)
+        let size = NSSize(width: 370, height: 82 + MarketOverviewView.height + rowsHeight)
         if let edgeDock { edgeDock.resize(to: size) }
         else {
             var frame = panel.frame
@@ -1177,7 +1240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         store.isAddingStock = false
         edgeDock?.hide()
     }
-    @objc private func refresh() { store.refresh() }
+    @objc private func refresh() { store.refresh(forceMarket: true) }
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func addStock() {
