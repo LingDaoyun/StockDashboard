@@ -3,7 +3,7 @@ import SwiftUI
 import Combine
 import UserNotifications
 
-private let quoteRowHeight: CGFloat = 78
+private let quoteRowHeight: CGFloat = 96
 private let trackingEditorHeight: CGFloat = 220
 
 @MainActor
@@ -490,6 +490,11 @@ enum DisplayFormat {
         if value >= 10_000 { return String(format: "%.2f万%@", value / 10_000, unit) }
         return String(format: "%.0f%@", value, unit)
     }
+
+    static func marketCap(_ yuan: Double) -> String {
+        if yuan >= 1_000_000_000_000 { return String(format: "%.2f万亿", yuan / 1_000_000_000_000) }
+        return magnitude(yuan, unit: "")
+    }
 }
 
 struct QuoteRow: View {
@@ -593,6 +598,15 @@ struct QuoteRow: View {
                     metric("成交量", value: quote.map { DisplayFormat.magnitude($0.volumeLots, unit: "手") } ?? "—")
                     metric("换手率", value: quote.flatMap(\.turnoverPercent).map { String(format: "%.2f%%", $0) } ?? "—")
                     metric("成交额", value: quote.map { DisplayFormat.magnitude($0.amountYuan, unit: "元") } ?? "—")
+                }
+                HStack(spacing: 10) {
+                    metric("PE动", value: quote.flatMap(\.peDynamic).map { $0 < 0 ? "亏损" : String(format: "%.2f", $0) } ?? "—")
+                        .help(quote.flatMap(\.peDynamic).map { String(format: "腾讯行情源动态市盈率：%.2f倍", $0) }
+                              ?? "腾讯行情源动态市盈率，暂无有效数据")
+                    metric("PB", value: quote.flatMap(\.pbRatio).map { String(format: "%.2f", $0) } ?? "—")
+                        .help("腾讯行情源市净率，单位为倍")
+                    metric("总市值", value: quote.flatMap(\.marketCapYuan).map { DisplayFormat.marketCap($0) } ?? "—")
+                        .help("腾讯行情源公司总市值，按全部股份口径，单位为人民币元")
                 }
             }
             .font(.system(size: 10))

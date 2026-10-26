@@ -40,7 +40,7 @@ enum QuoteTests {
                     try expect(quote.turnoverPercent.map { $0.isFinite && $0 >= 0 } == true, "实时行情应返回有效换手率：\(symbol.id)")
                     try expect(quote.volumeRatio.map { $0.isFinite && $0 >= 0 } == true, "实时行情应返回有效量比：\(symbol.id)")
                     try expect(quote.amplitudePercent.map { $0.isFinite && $0 >= 0 } == true, "实时行情应返回有效振幅：\(symbol.id)")
-                    print("LIVE: \(symbol.id) \(quote.name) price=\(quote.price) volumeLots=\(quote.volumeLots) amountYuan=\(quote.amountYuan) timestamp=\(quote.timestamp) turnoverPercent=\(quote.turnoverPercent.map { String($0) } ?? "—") volumeRatio=\(quote.volumeRatio.map { String($0) } ?? "—") amplitudePercent=\(quote.amplitudePercent.map { String($0) } ?? "—")")
+                    print("LIVE: \(symbol.id) \(quote.name) price=\(quote.price) volumeLots=\(quote.volumeLots) amountYuan=\(quote.amountYuan) timestamp=\(quote.timestamp) turnoverPercent=\(quote.turnoverPercent.map { String($0) } ?? "—") volumeRatio=\(quote.volumeRatio.map { String($0) } ?? "—") amplitudePercent=\(quote.amplitudePercent.map { String($0) } ?? "—") peDynamic=\(quote.peDynamic.map { String($0) } ?? "—") pbRatio=\(quote.pbRatio.map { String($0) } ?? "—") marketCapYuan=\(quote.marketCapYuan.map { String($0) } ?? "—")")
                 }
             }
             print("PASS: \(checks) assertions")
@@ -64,6 +64,12 @@ enum QuoteTests {
         fields[38] = "0.28"
         fields[43] = "2.12"
         fields[49] = "1.18"
+        fields[39] = "21.35"
+        fields[44] = "16600.00"
+        fields[45] = "16734.59"
+        fields[46] = "6.66"
+        fields[52] = "18.80"
+        fields[53] = "22.50"
         fields[57] = "440376.8903"
         for (index, value) in edits { fields[index] = value }
         return "v_\(symbol.id)=\"\(fields.prefix(count).joined(separator: "~"))\";\n"
@@ -99,6 +105,7 @@ enum QuoteTests {
         try expect(quote?.volumeRatio == 1.18, "49号量比字段应保留倍数原值，不应乘100")
         try expect(quote?.amplitudePercent == 2.12, "43号振幅字段已经是百分数，不应再乘100")
         try runAuctionTests(symbol)
+        try runValuationTests(symbol)
         let newer = fixture(symbol, edits: [3: "1264", 30: "20261009145656"])
         let older = fixture(symbol, edits: [3: "1262", 30: "20261009145650"])
         for lines in [newer + older, older + newer] {
@@ -155,12 +162,44 @@ enum QuoteTests {
         }
     }
 
+    static func runValuationTests(_ symbol: StockSymbol) throws {
+        let quote = try QuoteParser.parse(encoded(fixture(symbol)), symbols: [symbol])[symbol.id]!
+        try expect(quote.peDynamic == 18.80, "动态PE必须读取52号字段，不与39号或53号市盈率混用")
+        try expect(quote.pbRatio == 6.66, "PB读取46号市净率，单位倍")
+        try expect(abs((quote.marketCapYuan ?? 0) - 1_673_459_000_000) < 0.01,
+                   "总市值读取45号亿元并换算为元，不能使用44号流通市值")
+        let loss = try QuoteParser.parse(encoded(fixture(symbol, edits: [52: "-127.25", 46: "-0.74"])), symbols: [symbol])[symbol.id]!
+        try expect(loss.peDynamic == -127.25 && loss.pbRatio == -0.74, "保留负PE及负PB的原始含义，不转成正值")
+        for index in [45, 46, 52] {
+            for value in ["", "--", "bad", "NaN", "inf", "-inf", "0"] {
+                let partial = try QuoteParser.parse(encoded(fixture(symbol, edits: [index: value])), symbols: [symbol])[symbol.id]!
+                let metric = index == 45 ? partial.marketCapYuan : index == 46 ? partial.pbRatio : partial.peDynamic
+                try expect(metric == nil && partial.price == quote.price, "\(index)号估值缺失或无效时不丢失报价：\(value)")
+                try expect(index == 45 || partial.marketCapYuan == quote.marketCapYuan,
+                           "估值缺失不影响有效总市值")
+            }
+        }
+        for value in ["-1", "1e308"] {
+            let invalidCap = try QuoteParser.parse(encoded(fixture(symbol, edits: [45: value])), symbols: [symbol])[symbol.id]!
+            try expect(invalidCap.marketCapYuan == nil && invalidCap.pbRatio == quote.pbRatio,
+                       "总市值负数或单位换算溢出时只置空该指标")
+        }
+        for count in [38, 45, 46, 47, 52, 53] {
+            let short = try QuoteParser.parse(encoded(fixture(symbol, count: count)), symbols: [symbol])[symbol.id]!
+            try expect((short.marketCapYuan != nil) == (count > 45), "总市值按实际尾部长度读取：\(count)")
+            try expect((short.pbRatio != nil) == (count > 46), "PB按实际尾部长度读取：\(count)")
+            try expect((short.peDynamic != nil) == (count > 52), "动态PE缺字段时不退回其他PE口径：\(count)")
+        }
+    }
+
     static func runAuctionTests(_ symbol: StockSymbol) throws {
         let ordinary = Quote(symbol: symbol, name: "测试", price: 1263.12, previousClose: 1255.79,
                              change: 7.33, changePercent: 0.58, volumeLots: 34719,
                              amountYuan: 4_403_768_903, timestamp: Date(timeIntervalSince1970: 1_791_529_013),
                              turnoverPercent: 0.28, volumeRatio: 1.18, amplitudePercent: 2.12)
         try expect(ordinary.bidPrice == nil && ordinary.askPrice == nil, "原有Quote初始化调用应兼容，默认无买一卖一")
+        try expect(ordinary.peDynamic == nil && ordinary.pbRatio == nil && ordinary.marketCapYuan == nil,
+                   "原有Quote初始化调用继续兼容，缺失估值不伪造零值")
         try expect(ordinary.valuationPrice(isAuction: false) == 1263.12, "正常交易应继续使用成交价")
         try expect(ordinary.valuationPrice(isAuction: true) == nil, "竞价缺少买一卖一时不能借用上一笔成交价")
 
