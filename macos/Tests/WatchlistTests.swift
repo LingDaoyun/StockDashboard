@@ -439,5 +439,6 @@ struct WatchlistTests {
         print("PASS: \(try runTotalProfitTests()) total-profit assertions")
         print("PASS: \(try runRefreshTests()) refresh assertions")
         print("PASS: \(try runMarketRefreshTests()) market refresh assertions")
+        print("PASS: \(try runIntradayRefreshTests()) intraday refresh assertions")
     }
 }

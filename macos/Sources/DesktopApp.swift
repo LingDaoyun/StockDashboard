@@ -5,6 +5,7 @@ import UserNotifications
 
 private let quoteRowHeight: CGFloat = 96
 private let trackingEditorHeight: CGFloat = 220
+private let intradaySectionHeight: CGFloat = IntradayChartView.height + 12
 
 @MainActor
 final class QuoteStore: ObservableObject {
@@ -17,6 +18,10 @@ final class QuoteStore: ObservableObject {
     @Published private(set) var marketOverview: MarketOverviewSnapshot?
     @Published private(set) var marketError: String?
     @Published private(set) var isMarketRefreshing = false
+    @Published private(set) var expandedChartSymbolID: String?
+    @Published private(set) var intradaySnapshot: IntradaySnapshot?
+    @Published private(set) var intradayError: String?
+    @Published private(set) var isIntradayRefreshing = false
     @Published private(set) var marketNow: Date
     @Published var isAddingStock = false
     @Published var isAdjustingTransparency = false
@@ -45,11 +50,14 @@ final class QuoteStore: ObservableObject {
     private var request: Task<Void, Never>?
     private var marketRequest: Task<Void, Never>?
     private var lastMarketAttempt: Date?
+    private var intradayRequest: Task<Void, Never>?
+    private var lastIntradayAttempt: Date?
     private var activity: NSObjectProtocol?
     private var suspended = false
     private var started = false
     private let client: QuoteClient
     private let marketClient: (any MarketOverviewFetching)?
+    private let intradayClient: (any IntradayFetching)?
     private let clock: () -> Date
     private var undecodableTracking: [String: TrackingJSONValue] = [:]
     private var backedUpCorruptTracking = false
@@ -85,9 +93,11 @@ final class QuoteStore: ObservableObject {
     }
 
     init(defaults: UserDefaults, preview: String?, client: QuoteClient = QuoteClient(),
-         marketClient: (any MarketOverviewFetching)? = nil, clock: @escaping () -> Date = Date.init) {
+         marketClient: (any MarketOverviewFetching)? = nil,
+         intradayClient: (any IntradayFetching)? = nil, clock: @escaping () -> Date = Date.init) {
         self.client = client
         self.marketClient = marketClient
+        self.intradayClient = intradayClient
         self.clock = clock
         self.marketNow = clock()
         self.defaults = defaults
@@ -160,6 +170,7 @@ final class QuoteStore: ObservableObject {
                 + (configuration?.hasPosition == true ? 18 : 0)
                 + (configuration?.hasAlerts == true ? 18 : 0)
                 + (expandedSymbolID == symbol.id ? trackingEditorHeight : 0)
+                + (expandedChartSymbolID == symbol.id ? intradaySectionHeight : 0)
         }, 570)
     }
 
@@ -329,6 +340,7 @@ final class QuoteStore: ObservableObject {
         undecodableTracking = undecodableTracking.filter { ids.contains($0.key) }
         priceAlerts = priceAlerts.filter { ids.contains($0.key) }
         if let expandedSymbolID, !ids.contains(expandedSymbolID) { self.expandedSymbolID = nil }
+        if let expandedChartSymbolID, !ids.contains(expandedChartSymbolID) { closeIntraday() }
         persistTracking()
         unavailable = []
         lastReceipt = nil
@@ -351,6 +363,10 @@ final class QuoteStore: ObservableObject {
         marketRequest = nil
         isMarketRefreshing = false
         lastMarketAttempt = nil
+        intradayRequest?.cancel()
+        intradayRequest = nil
+        isIntradayRefreshing = false
+        lastIntradayAttempt = nil
         updateActivity()
     }
 
@@ -383,6 +399,7 @@ final class QuoteStore: ObservableObject {
         marketNow = clock()
         updateActivity()
         refreshMarket(force: forceMarket)
+        refreshIntraday(force: forceMarket)
         guard !suspended, !symbols.isEmpty, !isRefreshing else { return }
         let requested = symbols
         isRefreshing = true
@@ -414,6 +431,58 @@ final class QuoteStore: ObservableObject {
             }
             isRefreshing = false
             request = nil
+        }
+    }
+
+    func closeIntraday() {
+        intradayRequest?.cancel()
+        intradayRequest = nil
+        isIntradayRefreshing = false
+        lastIntradayAttempt = nil
+        expandedChartSymbolID = nil
+        intradaySnapshot = nil
+        intradayError = nil
+    }
+
+    func toggleIntraday(for symbol: StockSymbol) {
+        guard symbols.contains(symbol) else { return }
+        let opening = expandedChartSymbolID != symbol.id
+        closeIntraday()
+        if opening {
+            expandedSymbolID = nil
+            expandedChartSymbolID = symbol.id
+            refreshIntraday(force: true)
+        }
+    }
+
+    private func refreshIntraday(force: Bool) {
+        guard !suspended, let intradayClient, let id = expandedChartSymbolID,
+              let symbol = symbols.first(where: { $0.id == id }), !isIntradayRefreshing else { return }
+        let now = clock()
+        if !force, let lastIntradayAttempt, now >= lastIntradayAttempt,
+           now.timeIntervalSince(lastIntradayAttempt) < max(3, MarketClock.session(at: now).pollInterval) { return }
+        lastIntradayAttempt = now
+        isIntradayRefreshing = true
+        intradayRequest = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if !Task.isCancelled { self.isIntradayRefreshing = false; self.intradayRequest = nil }
+            }
+            do {
+                let incoming = try await intradayClient.fetch(symbol)
+                guard !Task.isCancelled, self.expandedChartSymbolID == symbol.id else { return }
+                let receipt = self.clock()
+                guard incoming.symbol == symbol, incoming.timestamp <= receipt.addingTimeInterval(5),
+                      self.intradaySnapshot.map({ incoming.timestamp >= $0.timestamp }) ?? true else {
+                    self.intradayError = "分时源时间异常，保留上次图并自动重试"
+                    return
+                }
+                self.intradaySnapshot = incoming
+                self.intradayError = nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.intradayError = error.localizedDescription
+            }
         }
     }
 
@@ -514,6 +583,12 @@ struct QuoteRow: View {
     let save: (String, String, String, String, Bool, String, String) throws -> Void
     let rearm: () -> Void
     let remove: () -> Void
+    var isChartExpanded = false
+    var intradaySnapshot: IntradaySnapshot?
+    var intradayError: String?
+    var isIntradayRefreshing = false
+    var chartNow = Date()
+    var showIntraday: () -> Void = {}
 
     private var profit: PositionProfit? { valuationPrice.flatMap { configuration.profit(at: $0) } }
     private var priceChange: Double? {
@@ -586,6 +661,12 @@ struct QuoteRow: View {
                             .buttonStyle(.plain)
                             .help("删除这只股票")
                             .accessibilityLabel("删除\(symbol.code)")
+                        Button(action: showIntraday) { Image(systemName: "chart.xyaxis.line") }
+                            .font(.system(size: 11))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(isChartExpanded ? Color.accentColor : Color.secondary)
+                            .help(isChartExpanded ? "收起分时图" : "查看价格走势和分钟成交量")
+                            .accessibilityLabel("\(isChartExpanded ? "收起" : "查看")\(symbol.code)分时图")
                         Spacer(minLength: 0)
                     }
                     .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
@@ -660,11 +741,20 @@ struct QuoteRow: View {
                         .frame(height: 214, alignment: .top)
                 }
             }
+            if isChartExpanded {
+                VStack(spacing: 5) {
+                    Divider().opacity(0.6)
+                    IntradayChartView(snapshot: intradaySnapshot, error: intradayError,
+                                      isRefreshing: isIntradayRefreshing, now: chartNow)
+                        .frame(height: IntradayChartView.height)
+                }
+            }
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 16)
         .frame(height: quoteRowHeight + (configuration.hasPosition ? 18 : 0)
-               + (configuration.hasAlerts ? 18 : 0) + (isExpanded ? trackingEditorHeight : 0))
+               + (configuration.hasAlerts ? 18 : 0) + (isExpanded ? trackingEditorHeight : 0)
+               + (isChartExpanded ? intradaySectionHeight : 0))
     }
 
     private func metric(_ title: String, value: String) -> some View {
@@ -687,6 +777,7 @@ struct WidgetView: View {
     let autoHide: () -> Void
     let hide: () -> Void
     let configure: (StockSymbol) -> Void
+    var intraday: (StockSymbol) -> Void = { _ in }
     @State private var newCode = ""
     @State private var additionError: String?
     @State private var searchClient = StockSearchClient()
@@ -858,6 +949,7 @@ struct WidgetView: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 198)
             } else {
+                ScrollViewReader { scroll in
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(store.symbols) { symbol in
@@ -878,12 +970,26 @@ struct WidgetView: View {
                                          store.expandedSymbolID = nil
                                      },
                                      rearm: { store.rearmAlerts(for: symbol) },
-                                     remove: { store.removeSymbol(symbol) })
+                                     remove: { store.removeSymbol(symbol) },
+                                     isChartExpanded: store.expandedChartSymbolID == symbol.id,
+                                     intradaySnapshot: store.expandedChartSymbolID == symbol.id ? store.intradaySnapshot : nil,
+                                     intradayError: store.expandedChartSymbolID == symbol.id ? store.intradayError : nil,
+                                     isIntradayRefreshing: store.isIntradayRefreshing,
+                                     chartNow: store.marketNow,
+                                     showIntraday: { intraday(symbol) })
+                                .id(symbol.id)
                             if symbol != store.symbols.last { Divider().padding(.horizontal, 16).opacity(0.6) }
                         }
                     }
                 }
                 .frame(height: store.listHeight)
+                .onChange(of: store.expandedChartSymbolID) { id in
+                    guard let id else { return }
+                    DispatchQueue.main.async {
+                        withAnimation(.easeInOut(duration: 0.15)) { scroll.scrollTo(id, anchor: .bottom) }
+                    }
+                }
+                }
             }
             Divider().opacity(0.6)
             HStack(spacing: 6) {
@@ -1042,7 +1148,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             previewDomain = domain
             defaults = UserDefaults(suiteName: domain)!
         } else { defaults = .standard }
-        store = QuoteStore(defaults: defaults, preview: preview, marketClient: MarketOverviewClient())
+        store = QuoteStore(defaults: defaults, preview: preview, marketClient: MarketOverviewClient(),
+                           intradayClient: IntradayClient())
         if !store.isPreview {
             notificationCenter = UNUserNotificationCenter.current()
             notificationCenter?.delegate = self
@@ -1062,6 +1169,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             DispatchQueue.main.async { self?.resizePanel() }
         })
         subscriptions.append(store.$expandedSymbolID.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.resizePanel() }
+        })
+        subscriptions.append(store.$expandedChartSymbolID.sink { [weak self] _ in
             DispatchQueue.main.async { self?.resizePanel() }
         })
         if store.tracking.values.contains(where: \.hasAlerts) { prepareNotifications() }
@@ -1168,7 +1278,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
                                                                pin: { [weak self] in self?.togglePin() },
                                                                autoHide: { [weak self] in self?.toggleAutoHide() },
                                                                hide: { [weak self] in self?.hidePanel() },
-                                                               configure: { [weak self] symbol in self?.toggleTracking(symbol) }))
+                                                               configure: { [weak self] symbol in self?.toggleTracking(symbol) },
+                                                               intraday: { [weak self] symbol in self?.toggleIntraday(symbol) }))
         host.translatesAutoresizingMaskIntoConstraints = false
         surface.addSubview(host)
         NSLayoutConstraint.activate([
@@ -1196,7 +1307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         panel.delegate = self
         edgeDock = EdgeDockController(panel: panel, surface: surface, defaults: store.defaults,
                                      enabled: store.autoHideEnabled) { [weak self] in
-            guard let store = self?.store else { return false }
+            guard let self, let store = self.store, self.panel?.isKeyWindow == true else { return false }
             return store.isAddingStock || store.isAdjustingTransparency || store.expandedSymbolID != nil
         }
     }
@@ -1249,6 +1360,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         edgeDock?.userMovedWindow()
     }
 
+    func windowDidResignKey(_ notification: Notification) {
+        guard notification.object as? NSWindow === panel else { return }
+        edgeDock?.focusLost()
+    }
+
     @objc private func showPanel() { edgeDock?.show() }
     @objc private func hidePanel() {
         store.isAddingStock = false
@@ -1293,7 +1409,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         panel.makeKeyAndOrderFront(nil)
         store.isAddingStock = false
         store.isAdjustingTransparency = false
+        store.closeIntraday()
         store.expandedSymbolID = store.expandedSymbolID == symbol.id ? nil : symbol.id
+    }
+
+    private func toggleIntraday(_ symbol: StockSymbol) {
+        edgeDock?.show()
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        store.isAddingStock = false
+        store.isAdjustingTransparency = false
+        store.toggleIntraday(for: symbol)
     }
 
     @objc private func prepareNotifications() {

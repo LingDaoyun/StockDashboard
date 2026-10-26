@@ -38,7 +38,9 @@ struct EdgeDockingTests {
             let delegate = DockingDelegate()
             var keepVisible = false
             let controller = EdgeDockController(panel: panel, surface: DesktopHoverView(), defaults: defaults,
-                                                enabled: true, handlePanel: handle, keepVisible: { keepVisible })
+                                                enabled: true, handlePanel: handle,
+                                                pointerLocation: { NSPoint(x: visible.minX + 1, y: visible.minY + 1) },
+                                                keepVisible: { keepVisible })
             delegate.controller = controller
             panel.delegate = delegate
             panel.orderFrontRegardless()
@@ -67,6 +69,50 @@ struct EdgeDockingTests {
             panel.orderOut(nil)
             panel.close()
             handle.close()
+            defaults.removePersistentDomain(forName: domain)
+        }
+        for scenario in ["editing", "pending-dock", "disabled", "manually-hidden"] {
+            let domain = "cn.local.AShareDesktop.focus-tests.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: domain)!
+            let y = NSEvent.mouseLocation.y > visible.midY ? visible.minY : visible.maxY - 280
+            let initial = NSRect(x: visible.midX - 185, y: y, width: 370, height: 280)
+            let panel = QuietPanel(contentRect: initial, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+            let handle = QuietPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+            panel.isReleasedWhenClosed = false
+            var focused = true
+            let controller = EdgeDockController(panel: panel, surface: DesktopHoverView(), defaults: defaults,
+                                                enabled: scenario != "disabled", handlePanel: handle,
+                                                pointerLocation: { NSPoint(x: visible.minX + 1, y: visible.minY + 1) },
+                                                keepVisible: { focused })
+            panel.orderFrontRegardless()
+            controller.restore()
+            if scenario == "editing" { RunLoop.main.run(until: Date().addingTimeInterval(0.25)) }
+            if scenario == "manually-hidden" { controller.hide() }
+            let beforeLoss = panel.frame
+            focused = false
+            controller.focusLost()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+            if scenario == "disabled" {
+                check(panel.isVisible && !handle.isVisible && panel.frame == beforeLoss,
+                      "关闭自动吸附时失焦保持普通浮窗")
+            } else if scenario == "manually-hidden" {
+                check(!panel.isVisible && !handle.isVisible && panel.frame == beforeLoss,
+                      "手动隐藏后失焦不能重新显示提示条或移动窗口")
+            } else {
+                check(!panel.isVisible && handle.isVisible, "\(scenario)：编辑失焦后收起为提示条")
+                check(defaults.double(forKey: "positionX") == visible.maxX - 370,
+                      "\(scenario)：失焦时自动停靠屏幕右侧")
+                (handle.contentView as? DesktopHoverView)?.onEnter?()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                check(!panel.isVisible && handle.isVisible, "\(scenario)：原地鼠标事件不能立即反弹展开")
+                focused = true
+                check(handle.contentView?.accessibilityPerformPress() == true,
+                      "\(scenario)：提示条可以显式激活")
+                RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+                check(panel.isVisible && !handle.isVisible, "\(scenario)：鼠标原地时显式激活提示条仍可继续编辑")
+            }
+            controller.stop()
+            panel.orderOut(nil); panel.close(); handle.close()
             defaults.removePersistentDomain(forName: domain)
         }
         print("PASS: \(checks) native docking assertions")

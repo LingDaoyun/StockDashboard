@@ -19,6 +19,7 @@ class DesktopHoverView: NSView {
 }
 
 private final class EdgeHandleView: DesktopHoverView {
+    var onPress: (() -> Void)?
     var edge = DesktopEdge.right { didSet { needsDisplay = true } }
 
     override init(frame frameRect: NSRect) {
@@ -51,7 +52,8 @@ private final class EdgeHandleView: DesktopHoverView {
         }
     }
 
-    override func accessibilityPerformPress() -> Bool { onEnter?(); return true }
+    override func mouseDown(with event: NSEvent) { onPress?() }
+    override func accessibilityPerformPress() -> Bool { onPress?(); return true }
 }
 
 @MainActor
@@ -60,6 +62,7 @@ final class EdgeDockController {
     private let panel: NSPanel
     private let defaults: UserDefaults
     private let keepVisible: () -> Bool
+    private let pointerLocation: () -> NSPoint
     private let handlePanel: NSPanel
     private let handleView: EdgeHandleView
     private var edge: DesktopEdge?
@@ -71,12 +74,15 @@ final class EdgeDockController {
     private var animating = false
     private var animationGeneration = 0
     private var enabled: Bool
+    private var focusLossPointer: NSPoint?
 
     init(panel: NSPanel, surface: DesktopHoverView, defaults: UserDefaults, enabled: Bool,
-         handlePanel testingHandlePanel: NSPanel? = nil, keepVisible: @escaping () -> Bool) {
+         handlePanel testingHandlePanel: NSPanel? = nil,
+         pointerLocation: @escaping () -> NSPoint = { NSEvent.mouseLocation }, keepVisible: @escaping () -> Bool) {
         self.panel = panel
         self.defaults = defaults
         self.keepVisible = keepVisible
+        self.pointerLocation = pointerLocation
         self.enabled = enabled
         handleView = EdgeHandleView(frame: .zero)
         handlePanel = testingHandlePanel ?? NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -96,14 +102,30 @@ final class EdgeDockController {
         }
         surface.onExit = { [weak self] in self?.scheduleCollapse() }
         handleView.onEnter = { [weak self] in self?.reveal() }
-        handleView.onExit = { [weak self] in self?.scheduleCollapse() }
+        handleView.onPress = { [weak self] in
+            guard let self, self.enabled, self.presentation == .collapsed else { return }
+            self.show()
+        }
+        handleView.onExit = { [weak self] in
+            self?.focusLossPointer = nil
+            self?.scheduleCollapse()
+        }
     }
 
     func restore() { startPointerMonitoring(); scheduleDock() }
 
+    func focusLost() {
+        guard enabled, presentation == .shown else { return }
+        cancelTimer()
+        cancelAnimation()
+        focusLossPointer = pointerLocation()
+        dockRight()
+    }
+
     func setEnabled(_ value: Bool) {
         guard enabled != value else { return }
         enabled = value
+        focusLossPointer = nil
         cancelTimer()
         cancelAnimation()
         if value { startPointerMonitoring(); scheduleDock() }
@@ -150,11 +172,12 @@ final class EdgeDockController {
         changeFrame(frame)
         if presentation != .shown { panel.orderOut(nil) }
         savePosition(frame)
-        if presentation == .collapsed, handlePanel.frame.contains(NSEvent.mouseLocation) { reveal() }
+        if presentation == .collapsed, handlePanel.frame.contains(pointerLocation()) { reveal() }
         else if presentation == .shown, !pointerInside() { scheduleCollapse() }
     }
 
     func show() {
+        focusLossPointer = nil
         cancelTimer()
         let wasCollapsed = presentation == .collapsed
         presentation = .shown
@@ -182,6 +205,7 @@ final class EdgeDockController {
     }
 
     func hide() {
+        focusLossPointer = nil
         cancelTimer()
         cancelAnimation()
         presentation = .manuallyHidden
@@ -207,7 +231,7 @@ final class EdgeDockController {
     private func checkPointer() {
         guard enabled, edge != nil, !animating, presentation != .manuallyHidden else { return }
         if presentation == .collapsed {
-            if handlePanel.isVisible, handlePanel.frame.contains(NSEvent.mouseLocation) { reveal() }
+            if handlePanel.isVisible, handlePanel.frame.contains(pointerLocation()) { reveal() }
         } else if pointerInside() {
             cancelTimer()
         } else if timer?.isValid != true {
@@ -220,21 +244,27 @@ final class EdgeDockController {
         schedule(after: 0.2) { [weak self] in
             guard let self, self.enabled, self.presentation == .shown else { return }
             if NSEvent.pressedMouseButtons & 1 != 0 { self.scheduleDock(); return }
-            let visible = self.visibleFrame(for: self.panel.frame)
-            let edge = DesktopEdge.right
-            let target = EdgeGeometry.expandedFrame(self.panel.frame, at: edge, in: visible)
-            self.edge = edge
-            self.expanded = target
-            self.changeFrame(target)
-            self.savePosition(target)
-            self.updateHandle(target, edge: edge, visible: visible)
-            self.collapse()
+            self.dockRight()
         }
+    }
+
+    private func dockRight() {
+        let reference = expanded ?? panel.frame
+        let visible = visibleFrame(for: reference)
+        let target = EdgeGeometry.expandedFrame(reference, at: .right, in: visible)
+        edge = .right
+        expanded = target
+        changeFrame(target)
+        savePosition(target)
+        updateHandle(target, edge: .right, visible: visible)
+        collapse()
     }
 
     private func reveal() {
         cancelTimer()
         guard enabled, presentation == .collapsed, !animating else { return }
+        // A stationary cursor must not immediately reopen a window that just lost focus.
+        if let focusLossPointer, focusLossPointer == pointerLocation() { return }
         show()
     }
 
@@ -257,7 +287,7 @@ final class EdgeDockController {
         animate(to: EdgeGeometry.collapsedFrame(from: expanded, at: edge, strip: 0)) { [weak self] in
             guard let self else { return }
             self.panel.orderOut(nil)
-            if self.handlePanel.frame.contains(NSEvent.mouseLocation) { self.reveal() }
+            if self.handlePanel.frame.contains(self.pointerLocation()) { self.reveal() }
         }
     }
 
@@ -267,7 +297,7 @@ final class EdgeDockController {
     }
 
     private func pointerInside() -> Bool {
-        let pointer = NSEvent.mouseLocation
+        let pointer = pointerLocation()
         return (panel.isVisible && panel.frame.contains(pointer))
             || (handlePanel.isVisible && handlePanel.frame.contains(pointer))
     }
