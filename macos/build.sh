@@ -51,8 +51,8 @@ cat > "$staging_app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>A股桌面行情</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
-  <key>CFBundleShortVersionString</key><string>1.8.8</string>
-  <key>CFBundleVersion</key><string>28</string>
+  <key>CFBundleShortVersionString</key><string>1.8.9</string>
+  <key>CFBundleVersion</key><string>29</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

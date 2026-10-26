@@ -89,6 +89,24 @@ enum IntradayTests {
         try expect(gap.points.map(\.volumeLots) == [100, nil, 30], "缺分钟不能把多分钟累积当单分钟量")
         let zero = try IntradayParser.parse(fixture(rows: ["0930 3.35 0", "0931 3.35 0"]), symbol: symbol)
         try expect(zero.points.map(\.volumeLots) == [0, 0], "真实零量保留")
+        let afterClose = try IntradayParser.parse(fixture(rows: [
+            "0930 3.35 100", "1459 3.34 900", "1500 3.33 1000",
+            "1506 3.33 1001", "1507 3.33 1002", "1530 3.33 1010"
+        ], time: "20261026161500"), symbol: symbol)
+        try expect(afterClose.points.map(\.minute) == [570, 899, 900], "收盘后保留完整正常时段，排除接口附加尾段")
+        try expect(afterClose.points.last?.cumulativeVolumeLots == 1000 && afterClose.points.last?.volumeLots == 100,
+                   "附加尾段不并入15:00的累计量或分钟量")
+        try expect(afterClose.timestamp == ISO8601DateFormatter().date(from: "2026-10-26T16:15:00+08:00"),
+                   "图表源时间仍采用真实报价时间")
+        for rows in [["1506 3.33 1000"], ["0930 3.35 100", "1506 3.33 1000"],
+                     ["0930 3.35 100", "1500 3.33 1000", "1531 3.33 1010"],
+                     ["0930 3.35 100", "1500 3.33 1000", "1506 3.33 1002", "1507 3.33 1001"],
+                     ["0930 3.35 100", "1500 3.33 1000", "1506 bad 1001"],
+                     ["0930 3.35 100", "1500 3.33 1000", "1506 3.33 1001", "1459 3.33 1002"]] {
+            try rejected("只接受位于收盘点之后的有效尾段，不泛化跳过坏数据") {
+                _ = try IntradayParser.parse(fixture(rows: rows, time: "20261026161500"), symbol: symbol)
+            }
+        }
         let beijing = StockSymbol(code: "920002", market: "bj")
         let beijingValue = try IntradayParser.parse(fixture(rows: ["0930 51.90 130", "0931 52.04 732"],
                                                            id: beijing.id), symbol: beijing)

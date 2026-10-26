@@ -63,20 +63,29 @@ enum IntradayParser {
         }
 
         var points: [IntradayPoint] = []
+        var previousSourceMinute: Int?
+        var previousSourceVolume: Double?
         for row in payload.data.data {
             let fields = row.split(whereSeparator: { $0.isWhitespace }).map(String.init)
             guard fields.count >= 3, let minute = minute(fields[0]),
-                  (570...690).contains(minute) || (780...900).contains(minute),
+                  (570...690).contains(minute) || (780...930).contains(minute),
                   minute <= sourceMinute + 1,
                   let price = positiveNumber(fields[1]),
                   let cumulative = Double(fields[2]), cumulative.isFinite, cumulative >= 0 else {
                 throw IntradayError.invalidData
             }
+            if let previousSourceMinute, minute <= previousSourceMinute { throw IntradayError.invalidData }
+            if let previousSourceVolume, cumulative < previousSourceVolume { throw IntradayError.invalidData }
+            previousSourceMinute = minute
+            previousSourceVolume = cumulative
+            // The service appends 15:01–15:30 records after its normal 15:00 close point.
+            // Keep the regular-session chart without treating that known tail as a bad packet.
+            if minute > 900 {
+                guard points.last?.minute == 900 else { throw IntradayError.invalidData }
+                continue
+            }
             let volume: Double?
             if let previous = points.last {
-                guard minute > previous.minute, cumulative >= previous.cumulativeVolumeLots else {
-                    throw IntradayError.invalidData
-                }
                 let adjacent = minute == previous.minute + 1 || (previous.minute == 690 && minute == 780)
                 volume = adjacent ? cumulative - previous.cumulativeVolumeLots : nil
             } else {
