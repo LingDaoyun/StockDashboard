@@ -5,7 +5,7 @@ test_dir="$(mktemp -d "${TMPDIR:-/tmp}/ashare-tests.XXXXXX")"
 trap 'rm -rf "$test_dir"' EXIT
 xcrun swiftc -swift-version 6 Sources/Quotes.swift Tests/QuoteTests.swift -o "$test_dir/quote-tests"
 "$test_dir/quote-tests" "$@"
-xcrun swiftc -swift-version 6 Sources/Quotes.swift Sources/Intraday.swift Tests/IntradayTests.swift -o "$test_dir/intraday-tests"
+xcrun swiftc -swift-version 6 Sources/Quotes.swift Sources/MarketClock.swift Sources/Intraday.swift Tests/IntradayTests.swift -o "$test_dir/intraday-tests"
 "$test_dir/intraday-tests"
 xcrun swiftc -swift-version 6 Sources/Quotes.swift Tests/QuoteClientTests.swift -o "$test_dir/quote-client-tests"
 "$test_dir/quote-client-tests"

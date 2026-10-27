@@ -145,6 +145,91 @@ func runIntradayRefreshTests() throws -> Int {
         checks += 1
     }
 
+    let (auction, auctionClient, auctionClock) = fixture(at: date("09:20:00"))
+    spin(until: { auction.quotes.count == 2 })
+    let auctionSymbol = auction.symbols[0]
+    func auctionQuote(at: Date, bid: Double? = 10.2, ask: Double? = 10.3, trade: Double = 10) -> Quote {
+        Quote(symbol: auctionSymbol, name: "offline-auction", price: trade, previousClose: 10,
+              change: 0, changePercent: 0, volumeLots: 0, amountYuan: 0, timestamp: at,
+              turnoverPercent: nil, volumeRatio: nil, amplitudePercent: nil, bidPrice: bid, askPrice: ask)
+    }
+    auction.receive([auctionSymbol.id: auctionQuote(at: auctionClock.now())],
+                    requested: [auctionSymbol], at: auctionClock.now())
+    auction.toggleIntraday(for: auctionSymbol)
+    spin(0.03)
+    try check(auction.intradaySnapshot?.points.first?.price == 10.2
+              && auction.intradaySnapshot?.points.first?.minute == 560 && auctionClient.count == 0,
+              "09:20竞价图必须从实时报价显示买一参考价，不能依赖09:30才有的分钟接口")
+    try check(auction.intradaySnapshot?.isOpeningAuction == true
+              && auction.intradaySnapshot?.points.allSatisfy({ $0.volumeLots == nil }) == true,
+              "竞价只显示参考价采样，不伪造分钟量")
+    auctionClock.advance(1)
+    auction.receive([auctionSymbol.id: auctionQuote(at: auctionClock.now(), bid: nil, ask: 10.4)],
+                    requested: [auctionSymbol], at: auctionClock.now())
+    try check(auction.intradaySnapshot?.points.map(\.price) == [10.2, 10.4],
+              "竞价图随已有每秒报价追加，缺买一时使用卖一")
+    auction.closeIntraday()
+    auctionClock.advance(1)
+    auction.receive([auctionSymbol.id: auctionQuote(at: auctionClock.now(), bid: 10.5)],
+                    requested: [auctionSymbol], at: auctionClock.now())
+    auction.toggleIntraday(for: auctionSymbol)
+    try check(auction.intradaySnapshot?.points.count == 3 && auctionClient.count == 0,
+              "关闭再展开保留程序期间的竞价采样，不请求分钟接口")
+    auctionClock.advance(298)
+    auction.receive([auctionSymbol.id: auctionQuote(at: auctionClock.now(), bid: 20, trade: 10.6)],
+                    requested: [auctionSymbol], at: auctionClock.now())
+    try check(auction.intradaySnapshot?.points.last?.price == 10.6
+              && auction.intradaySnapshot?.points.last?.minute == 565,
+              "09:25后开盘准备期显示竞价成交价，不能沿用盘口价")
+    auctionClock.advance(300)
+    auction.refresh()
+    spin(until: { auction.intradaySnapshot?.isOpeningAuction == false && auctionClient.count == 1 })
+    try check(auction.intradaySnapshot?.isOpeningAuction == false && auctionClient.count == 1,
+              "09:30自动切换普通分钟曲线并立即拉取")
+    auction.stop()
+
+    let (boundary, boundaryClient, boundaryClock) = fixture(at: date("09:14:59"))
+    let boundarySymbol = boundary.symbols[0]
+    boundaryClient.append(.init(snapshot(boundarySymbol, at: boundaryClock.now(), price: 99), delay: 0.15))
+    boundary.toggleIntraday(for: boundarySymbol)
+    spin(0.03, until: { boundaryClient.count == 1 })
+    boundaryClock.advance(1)
+    boundary.receive([boundarySymbol.id: auctionQuote(at: boundaryClock.now())],
+                     requested: [boundarySymbol], at: boundaryClock.now())
+    spin(0.2)
+    try check(boundary.intradaySnapshot?.isOpeningAuction == true
+              && boundary.intradaySnapshot?.points.last?.price == 10.2 && boundary.intradayError == nil,
+              "跨09:15边界晚到的普通分钟请求不能覆盖竞价采样")
+    boundary.stop()
+
+    for fails in [false, true] {
+        let (waiting, waitingClient, waitingClock) = fixture(at: date("09:14:59"))
+        let symbol = waiting.symbols[0]
+        waitingClient.append(.init(fails ? nil : snapshot(symbol, at: waitingClock.now(), price: 99), delay: 0.15))
+        waiting.toggleIntraday(for: symbol)
+        spin(0.03, until: { waitingClient.count == 1 })
+        waitingClock.advance(1)
+        spin(0.2)
+        try check(waiting.intradaySnapshot == nil && waiting.intradayError == nil,
+                  "竞价开始尚无盘口样本时，旧分钟请求无论成功或失败均不得回填")
+        waiting.stop()
+    }
+
+    let (noAuction, noAuctionClient, noAuctionClock) = fixture(at: date("09:20:00"))
+    spin(until: { noAuction.quotes.count == 2 })
+    noAuction.toggleIntraday(for: noAuction.symbols[0])
+    try check(noAuction.intradaySnapshot == nil && noAuction.intradayError == nil && noAuctionClient.count == 0,
+              "没有有效盘口价时等待当日竞价报价，不显示昨图或将成交价冒充参考价")
+    noAuctionClock.advance(1)
+    let noSymbol = noAuction.symbols[0]
+    noAuction.receive([noSymbol.id: auctionQuote(at: noAuctionClock.now())], requested: [noSymbol], at: noAuctionClock.now())
+    try check(noAuction.intradaySnapshot?.points.last?.price == 10.2,
+              "盘口恢复后图自动出现")
+    noAuction.removeSymbol(noSymbol)
+    try check(noAuction.intradaySnapshot == nil && noAuction.expandedChartSymbolID == nil,
+              "删除股票清理所选竞价图")
+    noAuction.stop()
+
     let (normal, normalClient, normalClock) = fixture()
     spin(until: { normal.quotes.count == 2 && normal.marketOverview != nil })
     normal.refresh(forceMarket: true)

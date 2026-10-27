@@ -52,6 +52,7 @@ final class QuoteStore: ObservableObject {
     private var lastMarketAttempt: Date?
     private var intradayRequest: Task<Void, Never>?
     private var lastIntradayAttempt: Date?
+    private var openingAuctionHistory = OpeningAuctionHistory()
     private var activity: NSObjectProtocol?
     private var suspended = false
     private var started = false
@@ -335,6 +336,7 @@ final class QuoteStore: ObservableObject {
         defaults.set(codeText, forKey: "symbols")
         let ids = Set(values.map(\.id))
         quotes = quotes.filter { ids.contains($0.key) }
+        openingAuctionHistory.retainSymbols(ids)
         tracking = tracking.filter { ids.contains($0.key) }
         invalidTracking = invalidTracking.filter { ids.contains($0.key) }
         undecodableTracking = undecodableTracking.filter { ids.contains($0.key) }
@@ -456,9 +458,23 @@ final class QuoteStore: ObservableObject {
     }
 
     private func refreshIntraday(force: Bool) {
-        guard !suspended, let intradayClient, let id = expandedChartSymbolID,
-              let symbol = symbols.first(where: { $0.id == id }), !isIntradayRefreshing else { return }
+        guard !suspended, let id = expandedChartSymbolID,
+              let symbol = symbols.first(where: { $0.id == id }) else { return }
         let now = clock()
+        if OpeningAuctionHistory.isActive(at: now) {
+            intradayRequest?.cancel()
+            intradayRequest = nil
+            isIntradayRefreshing = false
+            lastIntradayAttempt = nil
+            intradaySnapshot = openingAuctionHistory.snapshot(for: id, at: now)
+            intradayError = errorMessage
+            return
+        }
+        if intradaySnapshot?.isOpeningAuction == true {
+            intradaySnapshot = nil
+            intradayError = nil
+        }
+        guard let intradayClient, !isIntradayRefreshing else { return }
         if !force, let lastIntradayAttempt, now >= lastIntradayAttempt,
            now.timeIntervalSince(lastIntradayAttempt) < max(3, MarketClock.session(at: now).pollInterval) { return }
         lastIntradayAttempt = now
@@ -472,6 +488,7 @@ final class QuoteStore: ObservableObject {
                 let incoming = try await intradayClient.fetch(symbol)
                 guard !Task.isCancelled, self.expandedChartSymbolID == symbol.id else { return }
                 let receipt = self.clock()
+                guard !OpeningAuctionHistory.isActive(at: receipt) else { return }
                 guard incoming.symbol == symbol, incoming.timestamp <= receipt.addingTimeInterval(5),
                       self.intradaySnapshot.map({ incoming.timestamp >= $0.timestamp }) ?? true else {
                     self.intradayError = "分时源时间异常，保留上次图并自动重试"
@@ -480,7 +497,7 @@ final class QuoteStore: ObservableObject {
                 self.intradaySnapshot = incoming
                 self.intradayError = nil
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, !OpeningAuctionHistory.isActive(at: self.clock()) else { return }
                 self.intradayError = error.localizedDescription
             }
         }
@@ -528,11 +545,16 @@ final class QuoteStore: ObservableObject {
                   quotes[id].map({ quote.timestamp >= $0.timestamp }) ?? true else { continue }
             accepted[id] = quote
             quotes[id] = quote
+            openingAuctionHistory.record(quote, receivedAt: receipt)
         }
         unavailable.subtract(requestedIDs)
         unavailable.formUnion(requestedIDs.subtracting(accepted.keys))
         lastReceipt = receipt
         errorMessage = nil
+        if OpeningAuctionHistory.isActive(at: receipt), let id = expandedChartSymbolID {
+            intradaySnapshot = openingAuctionHistory.snapshot(for: id, at: receipt)
+            intradayError = nil
+        }
         evaluateAlerts(accepted, now: receipt)
     }
 }
@@ -745,7 +767,8 @@ struct QuoteRow: View {
                 VStack(spacing: 5) {
                     Divider().opacity(0.6)
                     IntradayChartView(snapshot: intradaySnapshot, error: intradayError,
-                                      isRefreshing: isIntradayRefreshing, now: chartNow)
+                                      isRefreshing: isIntradayRefreshing, now: chartNow,
+                                      isOpeningAuction: OpeningAuctionHistory.isActive(at: chartNow))
                         .frame(height: IntradayChartView.height)
                 }
             }

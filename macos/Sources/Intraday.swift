@@ -9,7 +9,8 @@ struct IntradayPoint: Identifiable, Sendable {
     let price: Double
     let cumulativeVolumeLots: Double
     let volumeLots: Double?
-    var id: Int { minute }
+    var second: Int = 0
+    var id: Int { minute * 60 + second }
     var sessionMinute: Int { minute <= 690 ? minute - 570 : minute - 780 + 120 }
     var timeText: String { String(format: "%02d:%02d", minute / 60, minute % 60) }
 }
@@ -20,6 +21,57 @@ struct IntradaySnapshot: Sendable {
     let timestamp: Date
     let previousClose: Double
     let points: [IntradayPoint]
+    var isOpeningAuction: Bool = false
+}
+
+// Keep only source-stamped quotes actually received while this process is running.
+// The minute endpoint does not supply the opening-auction price history.
+struct OpeningAuctionHistory {
+    private var snapshots: [String: IntradaySnapshot] = [:]
+    private static let calendar: Calendar = {
+        var value = Calendar(identifier: .gregorian)
+        value.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        return value
+    }()
+    private static func day(_ date: Date) -> String {
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d%02d%02d", parts.year!, parts.month!, parts.day!)
+    }
+    static func isActive(at date: Date) -> Bool {
+        let minute = calendar.component(.hour, from: date) * 60 + calendar.component(.minute, from: date)
+        let phase = MarketClock.session(at: date).phase
+        return (555..<570).contains(minute) && (phase == .auction || phase == .preOpen)
+    }
+    func snapshot(for id: String, at now: Date) -> IntradaySnapshot? {
+        guard Self.isActive(at: now), let value = snapshots[id], value.date == Self.day(now) else { return nil }
+        return value
+    }
+    mutating func retainSymbols(_ ids: Set<String>) {
+        snapshots = snapshots.filter { ids.contains($0.key) }
+    }
+    mutating func record(_ quote: Quote, receivedAt now: Date) {
+        let day = Self.day(now)
+        snapshots = snapshots.filter { $0.value.date == day }
+        guard Self.isActive(at: quote.timestamp), Self.day(quote.timestamp) == day,
+              quote.timestamp <= now.addingTimeInterval(5), now.timeIntervalSince(quote.timestamp) <= 15,
+              quote.previousClose.isFinite, quote.previousClose > 0 else { return }
+        let minute = Self.calendar.component(.hour, from: quote.timestamp) * 60
+            + Self.calendar.component(.minute, from: quote.timestamp)
+        func valid(_ value: Double?) -> Double? {
+            guard let value, value.isFinite, value > 0 else { return nil }
+            return value
+        }
+        // After 09:25 the auction has matched; use the actual last trade, not the live order book.
+        guard let price = minute < 565 ? (valid(quote.bidPrice) ?? valid(quote.askPrice)) : valid(quote.price) else { return }
+        var points = snapshots[quote.symbol.id]?.points ?? []
+        if let previous = snapshots[quote.symbol.id], quote.timestamp < previous.timestamp { return }
+        let point = IntradayPoint(minute: minute, price: price, cumulativeVolumeLots: 0, volumeLots: nil,
+                                  second: Self.calendar.component(.second, from: quote.timestamp))
+        if points.last?.id == point.id { points[points.count - 1] = point }
+        else { points.append(point) }
+        snapshots[quote.symbol.id] = IntradaySnapshot(symbol: quote.symbol, date: day,
+            timestamp: quote.timestamp, previousClose: quote.previousClose, points: points, isOpeningAuction: true)
+    }
 }
 
 enum IntradayError: LocalizedError {
@@ -69,7 +121,9 @@ enum IntradayParser {
             let fields = row.split(whereSeparator: { $0.isWhitespace }).map(String.init)
             guard fields.count >= 3, let minute = minute(fields[0]),
                   (570...690).contains(minute) || (780...930).contains(minute),
-                  minute <= sourceMinute + 1,
+                  // The source publishes its 09:30 opening bucket after the 09:25 auction match.
+                  // Keep its real quote timestamp and allow only this known pre-open bucket.
+                  minute <= sourceMinute + 1 || (minute == 570 && (565...569).contains(sourceMinute)),
                   let price = positiveNumber(fields[1]),
                   let cumulative = Double(fields[2]), cumulative.isFinite, cumulative >= 0 else {
                 throw IntradayError.invalidData

@@ -7,8 +7,9 @@ struct IntradayChartView: View {
     let error: String?
     let isRefreshing: Bool
     let now: Date
+    var isOpeningAuction: Bool = false
 
-    @State private var inspectedMinute: Int?
+    @State private var inspectedID: Int?
 
     private static let rising = Color(red: 0.85, green: 0.19, blue: 0.24)
     private static let falling = Color(red: 0.06, green: 0.59, blue: 0.38)
@@ -27,22 +28,28 @@ struct IntradayChartView: View {
         return formatter
     }()
 
+    private var showsAuction: Bool { snapshot?.isOpeningAuction ?? isOpeningAuction }
+
     var body: some View {
         VStack(spacing: 7) {
             HStack(spacing: 6) {
-                Text("分时").fontWeight(.medium)
+                Text(showsAuction ? "竞价" : "分时").fontWeight(.medium)
                 if let warning {
                     Circle().fill(.orange).frame(width: 4, height: 4)
                         .help(warning)
                         .accessibilityLabel("分时数据提示：" + warning)
                 }
                 Spacer(minLength: 3)
-                if let point = inspectedPoint {
-                    Text(point.timeText).foregroundStyle(.secondary)
+                if let point = headerPoint {
+                    Text(timeText(point)).foregroundStyle(.secondary)
                     Text(String(format: "%.2f", point.price)).foregroundStyle(Self.line)
-                    Text("量 " + Self.volumeText(point.volumeLots)).foregroundStyle(.secondary)
+                    if showsAuction {
+                        Text(point.minute < 565 ? "参考价" : "成交价").foregroundStyle(.secondary)
+                    } else {
+                        Text("量 " + Self.volumeText(point.volumeLots)).foregroundStyle(.secondary)
+                    }
                 } else {
-                    Text("价格 / 分钟量").foregroundStyle(.secondary)
+                    Text(showsAuction ? "等待竞价报价" : "价格 / 分钟量").foregroundStyle(.secondary)
                 }
                 if isRefreshing {
                     ProgressView().controlSize(.mini).scaleEffect(0.7)
@@ -68,25 +75,25 @@ struct IntradayChartView: View {
                                 case .active(let location):
                                     let plot = priceRect(in: geometry.size)
                                     guard location.x >= plot.minX, location.x <= plot.maxX else {
-                                        inspectedMinute = nil
+                                        inspectedID = nil
                                         return
                                     }
-                                    let minute = Double((location.x - plot.minX) / plot.width) * 240
-                                    inspectedMinute = snapshot.points.min {
-                                        abs(Double($0.sessionMinute) - minute) < abs(Double($1.sessionMinute) - minute)
-                                    }?.minute
+                                    let minute = Double((location.x - plot.minX) / plot.width) * (snapshot.isOpeningAuction ? 15 : 240)
+                                    inspectedID = snapshot.points.min {
+                                        abs(chartMinute($0, snapshot: snapshot) - minute) < abs(chartMinute($1, snapshot: snapshot) - minute)
+                                    }?.id
                                 case .ended:
-                                    inspectedMinute = nil
+                                    inspectedID = nil
                                 }
                             }
                     }
                 }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("价格走势与分钟成交量")
+                .accessibilityLabel(snapshot.isOpeningAuction ? "集合竞价价格走势" : "价格走势与分钟成交量")
                 .accessibilityValue(accessibilitySummary(snapshot))
             } else {
                 VStack(spacing: 5) {
-                    Text(error == nil ? (isRefreshing ? "正在加载分时…" : "尚无分时数据") : "分时暂不可用")
+                    Text(showsAuction ? "等待当日竞价报价…" : (error == nil ? (isRefreshing ? "正在加载分时…" : "尚无分时数据") : "分时暂不可用"))
                         .foregroundStyle(.secondary)
                     if let error, !error.isEmpty {
                         Text(error).lineLimit(2).foregroundStyle(.orange)
@@ -104,14 +111,29 @@ struct IntradayChartView: View {
     }
 
     private var inspectedPoint: IntradayPoint? {
-        guard let inspectedMinute else { return nil }
-        return snapshot?.points.first { $0.minute == inspectedMinute }
+        guard let inspectedID else { return nil }
+        return snapshot?.points.first { $0.id == inspectedID }
+    }
+
+    private var headerPoint: IntradayPoint? {
+        inspectedPoint ?? (showsAuction ? snapshot?.points.last : nil)
+    }
+
+    private func timeText(_ point: IntradayPoint) -> String {
+        showsAuction
+            ? String(format: "%02d:%02d:%02d", point.minute / 60, point.minute % 60, point.second)
+            : point.timeText
+    }
+
+    private func chartMinute(_ point: IntradayPoint, snapshot: IntradaySnapshot) -> Double {
+        snapshot.isOpeningAuction ? Double(point.minute - 555) + Double(point.second) / 60 : Double(point.sessionMinute)
     }
 
     private var warning: String? {
         var messages = [error].compactMap { $0 }.filter { !$0.isEmpty }
         if let snapshot {
-            if MarketClock.isStale(timestamp: snapshot.timestamp, at: now, session: MarketClock.session(at: now)) {
+            if MarketClock.isStale(timestamp: snapshot.timestamp, at: now, session: MarketClock.session(at: now))
+                || (snapshot.isOpeningAuction && now.timeIntervalSince(snapshot.timestamp) > 15) {
                 messages.append("行情源时间较旧，保留最近可用分时并自动更新")
             }
             if snapshot.date < Self.day.string(from: now) {
@@ -122,7 +144,11 @@ struct IntradayChartView: View {
     }
 
     private var details: String {
-        var lines = [
+        var lines = showsAuction ? [
+            "腾讯实时报价采样；蓝线为竞价价格，虚线为昨收。09:15至09:25买一优先、买一缺失时取卖一，09:25后使用成交价。",
+            "仅绘制程序实际收到的当日报价，不补造启动前或断线期间的历史点；相邻样本超过15秒时断线。竞价参考价并非最终成交价。",
+            "竞价阶段不显示分钟成交量，不把虚拟撮合量当作已成交量；09:30切回正常分时。"
+        ] : [
             "腾讯分时行情；上方蓝线为价格，下方为分钟成交量（手），虚线为昨收。",
             "显示09:30至15:00的正常时段；收盘后仍可查看当天曲线，接口附加的15:00后尾段不计入图中。",
             "量柱红绿仅表示该点价格较前一点上涨或下跌，首点与昨收比较；不代表主动买卖量。午休不占横轴时长。",
@@ -153,11 +179,13 @@ struct IntradayChartView: View {
         let span = max(high - low, 0.01)
         guard span.isFinite else { return }
         let maximumVolume = max(snapshot.points.compactMap(\.volumeLots).max() ?? 0, 1)
-        let x: (Int) -> CGFloat = { plot.minX + CGFloat($0) / 240 * plot.width }
+        let axisLength: Double = snapshot.isOpeningAuction ? 15 : 240
+        let x: (Double) -> CGFloat = { plot.minX + CGFloat($0 / axisLength) * plot.width }
         let y: (Double) -> CGFloat = { plot.maxY - CGFloat(($0 - low) / span) * plot.height }
 
-        // Both plots use the same compressed trading-minute axis.
-        for minute in [0, 60, 120, 180, 240] {
+        // Auction samples use source seconds; regular plots share compressed trading minutes.
+        let gridMinutes: [Double] = snapshot.isOpeningAuction ? [0, 5, 10, 15] : [0, 60, 120, 180, 240]
+        for minute in gridMinutes {
             let grid = Path { path in
                 path.move(to: CGPoint(x: x(minute), y: plot.minY))
                 path.addLine(to: CGPoint(x: x(minute), y: volume.maxY))
@@ -185,15 +213,23 @@ struct IntradayChartView: View {
         var path = Path()
         var previous: IntradayPoint?
         for point in snapshot.points {
-            let position = CGPoint(x: x(point.sessionMinute), y: y(point.price))
-            if let previous, point.minute == previous.minute + 1 || (previous.minute == 690 && point.minute == 780) {
-                path.addLine(to: position)
+            let position = CGPoint(x: x(chartMinute(point, snapshot: snapshot)), y: y(point.price))
+            let connects: Bool
+            if let previous {
+                if snapshot.isOpeningAuction {
+                    let seconds = (point.minute - previous.minute) * 60 + point.second - previous.second
+                    connects = seconds > 0 && seconds <= 15
+                } else {
+                    connects = point.minute == previous.minute + 1 || (previous.minute == 690 && point.minute == 780)
+                }
             } else {
-                path.move(to: position)
+                connects = false
             }
+            if connects { path.addLine(to: position) }
+            else { path.move(to: position) }
             let dot = CGRect(x: position.x - 0.9, y: position.y - 0.9, width: 1.8, height: 1.8)
             context.fill(Path(ellipseIn: dot), with: .color(Self.line))
-            if let lots = point.volumeLots, lots > 0 {
+            if !snapshot.isOpeningAuction, let lots = point.volumeLots, lots > 0 {
                 let height = max(0.7, CGFloat(lots / maximumVolume) * volume.height)
                 let width = max(0.8, min(3, plot.width / 240 * 0.82))
                 let bar = CGRect(x: position.x - width / 2, y: volume.maxY - height, width: width, height: height)
@@ -205,15 +241,22 @@ struct IntradayChartView: View {
         }
         context.stroke(path, with: .color(Self.line), style: StrokeStyle(lineWidth: 1.25, lineJoin: .round))
 
-        let baseline = Path { path in
-            path.move(to: CGPoint(x: volume.minX, y: volume.maxY))
-            path.addLine(to: CGPoint(x: volume.maxX, y: volume.maxY))
+        if snapshot.isOpeningAuction {
+            label("竞价参考价 · 09:25后为成交价", at: CGPoint(x: volume.midX, y: volume.minY + 9), anchor: .center, context: context)
+            label("仅记录收到的报价 · 不显示分钟量", at: CGPoint(x: volume.midX, y: volume.minY + 24), anchor: .center, context: context)
+        } else {
+            let baseline = Path { path in
+                path.move(to: CGPoint(x: volume.minX, y: volume.maxY))
+                path.addLine(to: CGPoint(x: volume.maxX, y: volume.maxY))
+            }
+            context.stroke(baseline, with: .color(.secondary.opacity(0.18)), lineWidth: 0.5)
+            label(Self.volumeText(maximumVolume), at: CGPoint(x: size.width, y: volume.minY + 3), context: context)
+            label("0", at: CGPoint(x: size.width, y: volume.maxY), context: context)
         }
-        context.stroke(baseline, with: .color(.secondary.opacity(0.18)), lineWidth: 0.5)
-        label(Self.volumeText(maximumVolume), at: CGPoint(x: size.width, y: volume.minY + 3), context: context)
-        label("0", at: CGPoint(x: size.width, y: volume.maxY), context: context)
 
-        let axis: [(Int, String, UnitPoint)] = [
+        let axis: [(Double, String, UnitPoint)] = snapshot.isOpeningAuction ? [
+            (0, "09:15", .leading), (5, "09:20", .center), (10, "09:25", .center), (15, "09:30", .trailing)
+        ] : [
             (0, "09:30", .leading), (60, "10:30", .center),
             (120, "11:30/13:00", .center), (180, "14:00", .center), (240, "15:00", .trailing)
         ]
@@ -222,7 +265,7 @@ struct IntradayChartView: View {
         }
 
         if let selected = inspectedPoint {
-            let selectedX = x(selected.sessionMinute)
+            let selectedX = x(chartMinute(selected, snapshot: snapshot))
             let cursor = Path { path in
                 path.move(to: CGPoint(x: selectedX, y: plot.minY))
                 path.addLine(to: CGPoint(x: selectedX, y: volume.maxY))
@@ -245,6 +288,10 @@ struct IntradayChartView: View {
 
     private func accessibilitySummary(_ snapshot: IntradaySnapshot) -> String {
         guard let latest = snapshot.points.last else { return "尚无分时数据" }
+        if snapshot.isOpeningAuction {
+            let priceKind = latest.minute < 565 ? "竞价参考价" : "竞价成交价"
+            return "\(timeText(latest))，\(priceKind)\(String(format: "%.2f", latest.price))，仅记录收到的报价，不显示分钟成交量。\(warning ?? "")"
+        }
         return "\(latest.timeText)，价格\(String(format: "%.2f", latest.price))，分钟成交量\(Self.volumeText(latest.volumeLots))。\(warning ?? "")"
     }
 }
