@@ -49,6 +49,7 @@ private final class RefreshProtocol: URLProtocol {
     override func startLoading() {
         Self.probe.lock.lock()
         Self.probe.requests.append((Date(), request.url!.absoluteString))
+        let requestNumber = Self.probe.requests.count
         Self.probe.active += 1
         Self.probe.maximumActive = max(Self.probe.maximumActive, Self.probe.active)
         let delay = Self.probe.delay
@@ -75,6 +76,8 @@ private final class RefreshProtocol: URLProtocol {
                 fields[1] = "synthetic"; fields[2] = String(id.dropFirst(2))
                 fields[3] = "10"; fields[4] = "10"; fields[30] = timestamp
                 fields[31] = "0"; fields[32] = "0"; fields[36] = "100"; fields[37] = "1"
+                fields[33] = String(10 + Double(requestNumber) / 10)
+                fields[34] = String(10 - Double(requestNumber) / 10)
                 return "v_\(id)=\"\(fields.joined(separator: "~"))\";"
             }.joined(separator: "\n").data(using: .utf8)!
             self.client?.urlProtocol(self, didReceive: HTTPURLResponse(url: self.request.url!, statusCode: 200,
@@ -132,6 +135,10 @@ func runRefreshTests() throws -> Int {
     let normal = makeStore()
     defer { normal.stop() }
     normal.start()
+    spin(0.5, until: { normal.quotes.count == 2 })
+    let firstHigh = normal.quotes[normal.symbols[0].id]?.dayHigh
+    let firstLow = normal.quotes[normal.symbols[0].id]?.dayLow
+    check(firstHigh != nil && firstLow != nil, "首次报价读取当日高低价，无需打开分时图")
     spin(2.8, until: { RefreshProtocol.probe.snapshot.requests.count >= 3 })
     let regular = RefreshProtocol.probe.snapshot
     check(regular.requests.count >= 3, "启动立即请求并在两秒左右完成三次批量请求")
@@ -140,6 +147,10 @@ func runRefreshTests() throws -> Int {
     check(regular.requests.allSatisfy { $0.1 == "https://qt.gtimg.cn/q=sh600108,sz002580" }, "每秒仍为所有股票一次批量请求")
     spin(0.2, until: { normal.quotes.count == 2 })
     check(normal.quotes.count == 2 && normal.errorMessage == nil, "每秒刷新正常更新行情缓存")
+    check(normal.quotes.values.allSatisfy { ($0.dayHigh ?? 0) > (firstHigh ?? 0) },
+          "后续自动行情请求更新每只股票的当日最高价")
+    check(normal.quotes.values.allSatisfy { ($0.dayLow ?? .infinity) < (firstLow ?? 0) },
+          "后续自动行情请求更新每只股票的当日最低价")
     check(normal.lastReceipt.map { $0 >= marketDate("10:00:00") && $0 < marketDate("10:00:04") } == true,
           "接收时间来自随真实耗时前进的模拟交易时钟")
     check(normal.quotes.values.allSatisfy { $0.timestamp >= marketDate("10:00:00") && $0.timestamp <= normal.marketNow },

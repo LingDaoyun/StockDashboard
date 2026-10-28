@@ -731,11 +731,10 @@ struct QuoteRow: View {
                     metric("成交额", value: quote.map { DisplayFormat.magnitude($0.amountYuan, unit: "元") } ?? "—")
                 }
                 HStack(spacing: 10) {
-                    metric("PE动", value: quote.flatMap(\.peDynamic).map { $0 < 0 ? "亏损" : String(format: "%.2f", $0) } ?? "—")
-                        .help(quote.flatMap(\.peDynamic).map { String(format: "腾讯行情源动态市盈率：%.2f倍", $0) }
-                              ?? "腾讯行情源动态市盈率，暂无有效数据")
-                    metric("PB", value: quote.flatMap(\.pbRatio).map { String(format: "%.2f", $0) } ?? "—")
-                        .help("腾讯行情源市净率，单位为倍")
+                    metric("最高", value: quote.flatMap(\.dayHigh).map { String(format: "%.2f", $0) } ?? "—")
+                        .help("今日最高价，随腾讯行情源报价刷新；休市时为最新交易日快照")
+                    metric("最低", value: quote.flatMap(\.dayLow).map { String(format: "%.2f", $0) } ?? "—")
+                        .help("今日最低价，随腾讯行情源报价刷新；休市时为最新交易日快照")
                     metric("总市值", value: quote.flatMap(\.marketCapYuan).map { DisplayFormat.marketCap($0) } ?? "—")
                         .help("腾讯行情源公司总市值，按全部股份口径，单位为人民币元")
                 }

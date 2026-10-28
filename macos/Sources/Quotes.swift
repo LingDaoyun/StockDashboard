@@ -47,15 +47,15 @@ struct Quote: Sendable {
     let amplitudePercent: Double?
     let bidPrice: Double?
     let askPrice: Double?
-    let peDynamic: Double?
-    let pbRatio: Double?
+    let dayHigh: Double?
+    let dayLow: Double?
     let marketCapYuan: Double?
 
     init(symbol: StockSymbol, name: String, price: Double, previousClose: Double,
          change: Double, changePercent: Double, volumeLots: Double, amountYuan: Double,
          timestamp: Date, turnoverPercent: Double?, volumeRatio: Double?, amplitudePercent: Double?,
-         bidPrice: Double? = nil, askPrice: Double? = nil, peDynamic: Double? = nil,
-         pbRatio: Double? = nil, marketCapYuan: Double? = nil) {
+         bidPrice: Double? = nil, askPrice: Double? = nil, dayHigh: Double? = nil,
+         dayLow: Double? = nil, marketCapYuan: Double? = nil) {
         self.symbol = symbol
         self.name = name
         self.price = price
@@ -70,8 +70,8 @@ struct Quote: Sendable {
         self.amplitudePercent = amplitudePercent
         self.bidPrice = bidPrice
         self.askPrice = askPrice
-        self.peDynamic = peDynamic
-        self.pbRatio = pbRatio
+        self.dayHigh = dayHigh
+        self.dayLow = dayLow
         self.marketCapYuan = marketCapYuan
     }
 
@@ -119,8 +119,8 @@ enum QuoteParser {
             let amplitudePercent = fields.count > 43 ? number(fields[43]).flatMap { $0 >= 0 ? $0 : nil } : nil
             let bidPrice = number(fields[9]).flatMap { $0 > 0 ? $0 : nil }
             let askPrice = number(fields[19]).flatMap { $0 > 0 ? $0 : nil }
-            let peDynamic = fields.count > 52 ? number(fields[52]).flatMap { $0 != 0 ? $0 : nil } : nil
-            let pbRatio = fields.count > 46 ? number(fields[46]).flatMap { $0 != 0 ? $0 : nil } : nil
+            let dayHigh = number(fields[33]).flatMap { $0 > 0 ? $0 : nil }
+            let dayLow = number(fields[34]).flatMap { $0 > 0 ? $0 : nil }
             let marketCapYuan = (fields.count > 45 ? number(fields[45]) : nil).flatMap { value -> Double? in
                 let yuan = value * 100_000_000
                 return value > 0 && yuan.isFinite ? yuan : nil
@@ -129,8 +129,8 @@ enum QuoteParser {
                                     change: change, changePercent: changePercent, volumeLots: volumeLots,
                                     amountYuan: amountWan * 10_000, timestamp: timestamp, turnoverPercent: turnoverPercent,
                                     volumeRatio: volumeRatio, amplitudePercent: amplitudePercent,
-                                    bidPrice: bidPrice, askPrice: askPrice, peDynamic: peDynamic,
-                                    pbRatio: pbRatio, marketCapYuan: marketCapYuan)
+                                    bidPrice: bidPrice, askPrice: askPrice, dayHigh: dayHigh,
+                                    dayLow: dayLow, marketCapYuan: marketCapYuan)
         }
         guard !quotes.isEmpty else { throw QuoteError.noQuotes }
         return quotes
