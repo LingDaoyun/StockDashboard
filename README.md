@@ -1,5 +1,11 @@
 # StockDashboard · A股桌面行情
 
+## 本地新增 Windows 版
+
+本分支新增原生 Windows 10/11 客户端，双击 `windows/dist/StockDashboard.exe` 运行。
+功能、构建与测试见 [Windows 使用说明](windows/README.md)；验证结果见 [验证记录](windows/VERIFICATION.md)。
+以下是上游 macOS 版本说明，macos 目录未改动。
+
 原生 macOS 桌面浮窗，交易及开盘准备时段每1秒批量请求自选A股行情，午休30秒、其他休市时段60秒，复用网络会话。适用于 Apple Silicon Mac，macOS13或以上。
 
 - 展示现价、涨跌额、涨跌幅、量比、日内振幅、当日累计成交量、换手率、成交额，以及动态PE、PB和总市值；红涨绿跌。

@@ -2,3 +2,7 @@
 *.app/
 .build/
 work/
+windows/dist/
+windows/release/
+windows/bin/
+windows/obj/
