@@ -46,6 +46,8 @@ struct IntradayChartView: View {
                     if showsAuction {
                         Text(point.minute < 565 ? "参考价" : "成交价").foregroundStyle(.secondary)
                     } else {
+                        Text("最高 " + Self.priceText(snapshot?.dayHigh)).foregroundStyle(.secondary)
+                        Text("最低 " + Self.priceText(snapshot?.dayLow)).foregroundStyle(.secondary)
                         Text("量 " + Self.volumeText(point.volumeLots)).foregroundStyle(.secondary)
                     }
                 } else {
@@ -116,7 +118,7 @@ struct IntradayChartView: View {
     }
 
     private var headerPoint: IntradayPoint? {
-        inspectedPoint ?? (showsAuction ? snapshot?.points.last : nil)
+        inspectedPoint ?? snapshot?.points.last
     }
 
     private func timeText(_ point: IntradayPoint) -> String {
@@ -150,6 +152,7 @@ struct IntradayChartView: View {
             "竞价阶段不显示分钟成交量，不把虚拟撮合量当作已成交量；09:30切回正常分时。"
         ] : [
             "腾讯分时行情；上方蓝线为价格，下方为分钟成交量（手），虚线为昨收。",
+            "最高、最低为分时交易日的行情源日内最高价和最低价，不随悬停分钟变化；缺失时显示—。",
             "显示09:30至15:00的正常时段；收盘后仍可查看当天曲线，接口附加的15:00后尾段不计入图中。",
             "量柱红绿仅表示该点价格较前一点上涨或下跌，首点与昨收比较；不代表主动买卖量。午休不占横轴时长。",
             "缺失分钟量不画零量柱；价格缺点处断开。分钟标签可能取区间末端或下一分钟，最后一个桶仍可能更新，不代表该分钟已结束。",
@@ -286,12 +289,16 @@ struct IntradayChartView: View {
         return lots >= 10_000 ? String(format: "%.1f万手", lots / 10_000) : String(format: "%.0f手", lots)
     }
 
+    private static func priceText(_ price: Double?) -> String {
+        price.map { String(format: "%.2f", $0) } ?? "—"
+    }
+
     private func accessibilitySummary(_ snapshot: IntradaySnapshot) -> String {
         guard let latest = snapshot.points.last else { return "尚无分时数据" }
         if snapshot.isOpeningAuction {
             let priceKind = latest.minute < 565 ? "竞价参考价" : "竞价成交价"
             return "\(timeText(latest))，\(priceKind)\(String(format: "%.2f", latest.price))，仅记录收到的报价，不显示分钟成交量。\(warning ?? "")"
         }
-        return "\(latest.timeText)，价格\(String(format: "%.2f", latest.price))，分钟成交量\(Self.volumeText(latest.volumeLots))。\(warning ?? "")"
+        return "\(latest.timeText)，价格\(String(format: "%.2f", latest.price))，最高\(Self.priceText(snapshot.dayHigh))，最低\(Self.priceText(snapshot.dayLow))，分钟成交量\(Self.volumeText(latest.volumeLots))。\(warning ?? "")"
     }
 }

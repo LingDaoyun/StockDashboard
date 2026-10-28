@@ -161,6 +161,21 @@ enum QuoteClientTests {
                 try expect(request.timeoutInterval == 6, "每笔请求保留六秒超时")
             }
 
+            let firstTab = try StockSymbol.parseList((600000..<600020).map(String.init).joined(separator: ","))
+            let secondTab = try StockSymbol.parseList((600020..<600040).map(String.init).joined(separator: ","))
+            let union = firstTab + secondTab
+            ClientTestProtocol.probe.set(.response(200, fixture(union, price: "10.04")))
+            let beforeUnion = ClientTestProtocol.probe.snapshot.requests.count
+            let combined = try await client!.fetch(firstTab + [firstTab[0]] + secondTab + [secondTab[0]])
+            try expect(combined.count == 40 && combined.values.allSatisfy { $0.price == 10.04 },
+                       "两个各20只股票的页签应在一次合并请求中返回全部40只行情")
+            let unionRequests = Array(ClientTestProtocol.probe.snapshot.requests.dropFirst(beforeUnion))
+            try expect(unionRequests.count == 1,
+                       "40只股票和重复代码应合并为一次传输请求")
+            try expect(unionRequests.first?.url?.absoluteString ==
+                       "https://qt.gtimg.cn/q=" + union.map(\.id).joined(separator: ","),
+                       "合并请求应按首次出现的顺序去重，不受单页20只上限影响")
+
             let beforeEmpty = ClientTestProtocol.probe.snapshot.requests.count
             let empty = try await client!.fetch([])
             try expect(empty.isEmpty && ClientTestProtocol.probe.snapshot.requests.count == beforeEmpty,
@@ -171,6 +186,15 @@ enum QuoteClientTests {
             } catch QuoteError.invalidSymbol {
                 try expect(ClientTestProtocol.probe.snapshot.requests.count == beforeEmpty,
                            "非法代码不能拼入 URL 或发出请求")
+            }
+            for code in ["600001,sz000002", "600001,sh600001"] {
+                do {
+                    _ = try await client!.fetch([StockSymbol(code: code, market: "sh")])
+                    throw ClientTestFailure(description: "单个股票对象不能包含多个代码：\(code)")
+                } catch QuoteError.invalidSymbol {
+                    try expect(ClientTestProtocol.probe.snapshot.requests.count == beforeEmpty,
+                               "含分隔符的股票对象必须在网络请求前拒绝，即使解析后会去重：\(code)")
+                }
             }
 
             ClientTestProtocol.probe.set(.response(503, Data()))

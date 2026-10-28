@@ -54,12 +54,12 @@ enum IntradayTests {
     static func fixture(rows: [String] = ["0930 3.35 6607 2213345", "0931 3.35 45881 15375472"],
                         date: String = "20261026", time: String = "20261026093033",
                         previousClose: String = "3.36", code: Int = 0, id: String = "sh600108",
-                        qtEdits: [Int: String] = [:], extraQT: [String: Any] = [:]) -> Data {
+                        qtEdits: [Int: String] = [:], extraQT: [String: Any] = [:], qtCount: Int = 38) -> Data {
         var qt = Array(repeating: "", count: 38)
         qt[2] = String(id.dropFirst(2)); qt[3] = "3.35"; qt[4] = previousClose; qt[30] = time
         for (index, value) in qtEdits { qt[index] = value }
         var quotes: [String: Any] = extraQT
-        quotes[id] = qt
+        quotes[id] = Array(qt.prefix(qtCount))
         return try! JSONSerialization.data(withJSONObject: ["code": code, "data": [id: [
             "data": ["date": date, "data": rows], "qt": quotes]]])
     }
@@ -74,6 +74,24 @@ enum IntradayTests {
         try expect(mixedQT.points.count == 2, "无关qt字段的混合类型不应阻止目标股票解析")
         try expect(value.symbol == symbol && value.date == "20261026", "分时数据匹配代码和交易日")
         try expect(value.previousClose == 3.36 && value.points.map(\.price) == [3.35, 3.35], "读取昨收和价格")
+        let range = try IntradayParser.parse(fixture(qtEdits: [33: "3.42", 34: "3.28"]), symbol: symbol)
+        try expect(range.dayHigh == 3.42 && range.dayLow == 3.28,
+                   "当天最高最低读取报价字段，不用分钟采样点或昨收代替")
+        try expect(value.dayHigh == nil && value.dayLow == nil, "缺失日高低保留为空，不补造价格")
+        for index in [33, 34] {
+            for invalid in ["", "0", "-1", "NaN", "inf", "bad"] {
+                var edits = [33: "3.42", 34: "3.28"]
+                edits[index] = invalid
+                let partial = try IntradayParser.parse(fixture(qtEdits: edits), symbol: symbol)
+                try expect((index == 33 ? partial.dayHigh : partial.dayLow) == nil,
+                           "无效日高低只清空对应字段：\(index) \(invalid)")
+                try expect((index == 33 ? partial.dayLow : partial.dayHigh) == (index == 33 ? 3.28 : 3.42)
+                           && partial.points.count == 2, "缺少一项日高低仍保留另一项及分时图")
+            }
+        }
+        let shortQuote = try IntradayParser.parse(fixture(qtCount: 31), symbol: symbol)
+        try expect(shortQuote.dayHigh == nil && shortQuote.dayLow == nil && shortQuote.points.count == 2,
+                   "基础报价缺少日高低字段时仍能展示分时图")
         try expect(value.points.map(\.cumulativeVolumeLots) == [6607, 45881], "累计量保留手单位，不乘100")
         try expect(value.points.map(\.volumeLots) == [6607, 39274], "首点保留源量，后续量柱为累计差分")
         try expect(value.points.map(\.minute) == [570, 571] && value.points[0].id == 570 * 60, "分钟和稳定ID")

@@ -158,7 +158,15 @@ final class QuoteClient: Sendable {
 
     func fetch(_ symbols: [StockSymbol]) async throws -> [String: Quote] {
         guard !symbols.isEmpty else { return [:] }
-        let normalized = try StockSymbol.parseList(symbols.map(\.id).joined(separator: ","))
+        var normalized: [StockSymbol] = []
+        var seen = Set<String>()
+        for symbol in symbols {
+            let parsed = try StockSymbol.parseList(symbol.id)
+            guard parsed.count == 1, parsed[0] == symbol else {
+                throw QuoteError.invalidSymbol(symbol.id)
+            }
+            if seen.insert(symbol.id).inserted { normalized.append(symbol) }
+        }
         let url = URL(string: "https://qt.gtimg.cn/q=" + normalized.map(\.id).joined(separator: ","))!
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 6)
         request.httpMethod = "GET"

@@ -22,6 +22,8 @@ struct IntradaySnapshot: Sendable {
     let previousClose: Double
     let points: [IntradayPoint]
     var isOpeningAuction: Bool = false
+    var dayHigh: Double? = nil
+    var dayLow: Double? = nil
 }
 
 // Keep only source-stamped quotes actually received while this process is running.
@@ -150,7 +152,9 @@ enum IntradayParser {
                                         cumulativeVolumeLots: cumulative, volumeLots: volume))
         }
         return IntradaySnapshot(symbol: symbol, date: day, timestamp: timestamp,
-                                previousClose: previousClose, points: points)
+                                previousClose: previousClose, points: points,
+                                dayHigh: qt.count > 33 ? positiveNumber(qt[33]) : nil,
+                                dayLow: qt.count > 34 ? positiveNumber(qt[34]) : nil)
     }
 
     private struct Response: Decodable {

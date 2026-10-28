@@ -7,9 +7,18 @@ private let quoteRowHeight: CGFloat = 96
 private let trackingEditorHeight: CGFloat = 220
 private let intradaySectionHeight: CGFloat = IntradayChartView.height + 12
 
+enum StockList: String, CaseIterable {
+    case holdings, watchlist
+
+    var title: String { self == .holdings ? "持仓股" : "自选股" }
+    var storageKey: String { self == .holdings ? "symbols" : "watchlistSymbols" }
+}
+
 @MainActor
 final class QuoteStore: ObservableObject {
     @Published private(set) var symbols: [StockSymbol]
+    @Published private(set) var watchlistSymbols: [StockSymbol]
+    @Published private(set) var selectedList: StockList = .holdings
     @Published private(set) var quotes: [String: Quote] = [:]
     @Published private(set) var unavailable: Set<String> = []
     @Published private(set) var lastReceipt: Date?
@@ -105,13 +114,15 @@ final class QuoteStore: ObservableObject {
         self.isPreview = preview != nil
         let saved = preview ?? defaults.string(forKey: "symbols") ?? ""
         self.symbols = (try? StockSymbol.parseList(saved)) ?? []
+        self.watchlistSymbols = preview == nil
+            ? (try? StockSymbol.parseList(defaults.string(forKey: "watchlistSymbols") ?? "")) ?? [] : []
         self.isPinned = defaults.object(forKey: "pinned") as? Bool ?? false
         self.buyCommissionRate = defaults.string(forKey: "buyCommissionRate") ?? "2.5"
         self.autoHideEnabled = defaults.object(forKey: "autoHideEnabled") as? Bool ?? true
         self.backgroundTransparency = min(1, max(0, defaults.object(forKey: "backgroundTransparency") as? Double ?? 0.3))
         if let data = defaults.data(forKey: "stockTracking") {
             if let savedTracking = try? JSONDecoder().decode([String: TrackingJSONValue].self, from: data) {
-                let ids = Set(symbols.map(\.id))
+                let ids = Set(allSymbols.map(\.id))
                 for (id, rawValue) in savedTracking where ids.contains(id) {
                     guard let rawData = try? JSONEncoder().encode(rawValue),
                           let value = try? JSONDecoder().decode(StockTracking.self, from: rawData) else {
@@ -132,7 +143,20 @@ final class QuoteStore: ObservableObject {
         }
     }
 
-    var codeText: String { symbols.map(\.id).joined(separator: ", ") }
+    var visibleSymbols: [StockSymbol] { selectedList == .holdings ? symbols : watchlistSymbols }
+    var allSymbols: [StockSymbol] {
+        let holdingIDs = Set(symbols.map(\.id))
+        return symbols + watchlistSymbols.filter { !holdingIDs.contains($0.id) }
+    }
+    var codeText: String { visibleSymbols.map(\.id).joined(separator: ", ") }
+
+    func selectList(_ list: StockList) {
+        guard selectedList != list else { return }
+        isAddingStock = false
+        expandedSymbolID = nil
+        closeIntraday()
+        selectedList = list
+    }
 
     var marketSession: MarketSession { MarketClock.session(at: marketNow) }
     var isAuction: Bool { marketSession.phase == .auction }
@@ -140,15 +164,16 @@ final class QuoteStore: ObservableObject {
         quotes[symbol.id]?.valuationPrice(isAuction: isAuction)
     }
     var missingAuctionPrice: Bool {
-        isAuction && symbols.contains { quotes[$0.id] != nil && valuationPrice(for: $0) == nil }
+        isAuction && visibleSymbols.contains { quotes[$0.id] != nil && valuationPrice(for: $0) == nil }
     }
-    var oldestQuoteTime: Date? { quotes.values.map(\.timestamp).min() }
+    var oldestQuoteTime: Date? { visibleSymbols.compactMap { quotes[$0.id]?.timestamp }.min() }
     var hasStaleQuotes: Bool {
         oldestQuoteTime.map { MarketClock.isStale(timestamp: $0, at: marketNow, session: marketSession) } ?? false
     }
 
     var totalPositionProfit: Decimal? {
-        guard trackingStorageNotice == nil, !invalidTracking.values.contains(where: {
+        guard !backedUpCorruptTracking, !symbols.contains(where: { undecodableTracking[$0.id] != nil }),
+              !symbols.compactMap({ invalidTracking[$0.id] }).contains(where: {
             $0.costPrice != nil || $0.totalCostYuan != nil || $0.quantity != nil
                 || $0.purchaseAmountYuan != nil || $0.purchaseCommissionRate != nil || $0.perShareCostYuan != nil
         }) else { return nil }
@@ -164,6 +189,7 @@ final class QuoteStore: ObservableObject {
     }
 
     var listHeight: CGFloat {
+        let symbols = visibleSymbols
         if symbols.isEmpty { return 198 }
         return min(symbols.reduce(CGFloat(max(0, symbols.count - 1))) { total, symbol in
             let configuration = tracking[symbol.id]
@@ -178,7 +204,7 @@ final class QuoteStore: ObservableObject {
     func saveTracking(for symbol: StockSymbol, cost: String, quantity: String, upper: String, lower: String,
                       totalCost: String = "", purchaseAmount: String = "", purchaseCommissionRate: Decimal? = nil,
                       perShareCost: String = "", now: Date = Date()) throws {
-        guard symbols.contains(symbol) else {
+        guard allSymbols.contains(symbol) else {
             throw NSError(domain: "StockTracking", code: 1, userInfo: [NSLocalizedDescriptionKey: "股票已移除，请重新添加。"])
         }
         var value = try StockTracking.parse(cost: cost, quantity: quantity, upper: upper, lower: lower,
@@ -255,7 +281,7 @@ final class QuoteStore: ObservableObject {
         // Auction book updates can carry a fresh timestamp while the last trade is unchanged.
         guard MarketClock.session(at: now).phase != .auction else { return }
         var changed = false
-        for symbol in symbols {
+        for symbol in allSymbols {
             guard let quote = incoming[symbol.id], var value = tracking[symbol.id] else { continue }
             guard MarketClock.session(at: quote.timestamp).phase != .auction else { continue }
             let alerts = value.takeAlerts(for: quote, now: now)
@@ -294,10 +320,10 @@ final class QuoteStore: ObservableObject {
     private func scheduleNextTick() {
         timer?.invalidate()
         timer = nil
-        guard started, !suspended, !symbols.isEmpty || marketClient != nil else { return }
+        guard started, !suspended, !allSymbols.isEmpty || marketClient != nil else { return }
         let now = clock()
         let session = MarketClock.session(at: now)
-        let interval = symbols.isEmpty ? max(3, session.pollInterval) : session.pollInterval
+        let interval = allSymbols.isEmpty ? max(3, session.pollInterval) : session.pollInterval
         let delay = max(0.01, min(interval, session.nextChange.timeIntervalSince(now)))
         let next = Timer(timeInterval: delay, repeats: false) { [weak self] fired in
             Task { @MainActor in
@@ -320,34 +346,36 @@ final class QuoteStore: ObservableObject {
 
     func addSymbols(_ text: String) throws {
         let added = try StockSymbol.parseList(text)
-        let merged = try StockSymbol.parseList((symbols + added).map(\.id).joined(separator: ","))
+        let merged = try StockSymbol.parseList((visibleSymbols + added).map(\.id).joined(separator: ","))
         applySymbols(merged)
     }
 
     func removeSymbol(_ symbol: StockSymbol) {
-        applySymbols(symbols.filter { $0 != symbol })
+        applySymbols(visibleSymbols.filter { $0 != symbol })
     }
 
     private func applySymbols(_ values: [StockSymbol]) {
         request?.cancel()
         request = nil
         isRefreshing = false
-        symbols = values
-        defaults.set(codeText, forKey: "symbols")
-        let ids = Set(values.map(\.id))
+        if selectedList == .holdings { symbols = values }
+        else { watchlistSymbols = values }
+        defaults.set(codeText, forKey: selectedList.storageKey)
+        let ids = Set(allSymbols.map(\.id))
         quotes = quotes.filter { ids.contains($0.key) }
         openingAuctionHistory.retainSymbols(ids)
         tracking = tracking.filter { ids.contains($0.key) }
         invalidTracking = invalidTracking.filter { ids.contains($0.key) }
         undecodableTracking = undecodableTracking.filter { ids.contains($0.key) }
         priceAlerts = priceAlerts.filter { ids.contains($0.key) }
-        if let expandedSymbolID, !ids.contains(expandedSymbolID) { self.expandedSymbolID = nil }
-        if let expandedChartSymbolID, !ids.contains(expandedChartSymbolID) { closeIntraday() }
+        let visibleIDs = Set(visibleSymbols.map(\.id))
+        if let expandedSymbolID, !visibleIDs.contains(expandedSymbolID) { self.expandedSymbolID = nil }
+        if let expandedChartSymbolID, !visibleIDs.contains(expandedChartSymbolID) { closeIntraday() }
         persistTracking()
         unavailable = []
         lastReceipt = nil
         errorMessage = nil
-        if values.isEmpty {
+        if allSymbols.isEmpty {
             quotes = [:]
         }
         refresh()
@@ -385,7 +413,7 @@ final class QuoteStore: ObservableObject {
     }
 
     private func updateActivity() {
-        let needsActivity = started && (!symbols.isEmpty || marketClient != nil) && !suspended && marketSession.pollInterval == 1
+        let needsActivity = started && (!allSymbols.isEmpty || marketClient != nil) && !suspended && marketSession.pollInterval == 1
         if !needsActivity, let activity {
             ProcessInfo.processInfo.endActivity(activity)
             self.activity = nil
@@ -402,8 +430,8 @@ final class QuoteStore: ObservableObject {
         updateActivity()
         refreshMarket(force: forceMarket)
         refreshIntraday(force: forceMarket)
-        guard !suspended, !symbols.isEmpty, !isRefreshing else { return }
-        let requested = symbols
+        guard !suspended, !allSymbols.isEmpty, !isRefreshing else { return }
+        let requested = allSymbols
         isRefreshing = true
         if isPreview {
             print("request \(Date().timeIntervalSince1970) \(requested.map(\.id).joined(separator: ","))")
@@ -447,7 +475,7 @@ final class QuoteStore: ObservableObject {
     }
 
     func toggleIntraday(for symbol: StockSymbol) {
-        guard symbols.contains(symbol) else { return }
+        guard visibleSymbols.contains(symbol) else { return }
         let opening = expandedChartSymbolID != symbol.id
         closeIntraday()
         if opening {
@@ -459,7 +487,7 @@ final class QuoteStore: ObservableObject {
 
     private func refreshIntraday(force: Bool) {
         guard !suspended, let id = expandedChartSymbolID,
-              let symbol = symbols.first(where: { $0.id == id }) else { return }
+              let symbol = visibleSymbols.first(where: { $0.id == id }) else { return }
         let now = clock()
         if OpeningAuctionHistory.isActive(at: now) {
             intradayRequest?.cancel()
@@ -537,7 +565,7 @@ final class QuoteStore: ObservableObject {
 
     func receive(_ incoming: [String: Quote], requested: [StockSymbol], at receipt: Date) {
         marketNow = receipt
-        let current = Set(symbols.map(\.id))
+        let current = Set(allSymbols.map(\.id))
         let requestedIDs = Set(requested.map(\.id)).intersection(current)
         var accepted: [String: Quote] = [:]
         for (id, quote) in incoming where requestedIDs.contains(id) {
@@ -810,23 +838,25 @@ struct WidgetView: View {
     @FocusState private var codeFocused: Bool
 
     private var cadence: String { "\(Int(store.marketSession.pollInterval))秒刷新" }
+    private var hasUnavailableQuotes: Bool { store.visibleSymbols.contains { store.unavailable.contains($0.id) } }
+    private var hasInvalidTracking: Bool { store.visibleSymbols.contains { store.invalidTracking[$0.id] != nil } }
     private var quoteAge: String? {
         store.oldestQuoteTime.map { MarketClock.ageText(since: $0, at: store.marketNow) }
     }
     private var statusColor: Color {
-        if store.symbols.isEmpty, additionError == nil {
+        if store.visibleSymbols.isEmpty, additionError == nil {
             if store.marketError != nil { return .orange }
             guard let snapshot = store.marketOverview else { return .secondary }
             if MarketClock.isStale(timestamp: min(snapshot.index.timestamp, snapshot.market.timestamp), at: store.marketNow, session: store.marketSession) { return .orange }
             return store.marketSession.expectsFreshQuotes ? .green : .secondary
         }
-        if additionError != nil || store.errorMessage != nil || !store.unavailable.isEmpty ||
-            !store.invalidTracking.isEmpty || store.trackingStorageNotice != nil ||
+        if additionError != nil || store.errorMessage != nil || hasUnavailableQuotes ||
+            hasInvalidTracking || store.trackingStorageNotice != nil ||
             store.hasStaleQuotes || store.missingAuctionPrice || !store.marketSession.calendarKnown { return .orange }
         return store.oldestQuoteTime != nil && store.marketSession.expectsFreshQuotes ? .green : .secondary
     }
     private var statusHelp: String {
-        if store.symbols.isEmpty {
+        if store.visibleSymbols.isEmpty {
             return (store.marketError.map { $0 + "\n" } ?? "") + "上证指数来自腾讯；全A统计来自同花顺沪深京A股。交易时段大盘每3秒请求，午休30秒、休市60秒；源时间和昨日同刻口径可悬停顶部大盘区域查看。"
         }
         let sourceTime = store.oldestQuoteTime.map { DisplayFormat.chinaTime.string(from: $0) } ?? "—"
@@ -841,7 +871,7 @@ struct WidgetView: View {
         if let additionError { return additionError }
         if isSearching { return "正在搜索股票…" }
         if let notice = store.trackingStorageNotice { return notice }
-        if store.symbols.isEmpty {
+        if store.visibleSymbols.isEmpty {
             if store.marketError != nil { return "大盘连接失败 · 自动重试" }
             if let market = store.marketOverview {
                 let age = MarketClock.ageText(since: min(market.index.timestamp, market.market.timestamp), at: store.marketNow)
@@ -853,9 +883,9 @@ struct WidgetView: View {
             return quoteAge.map { "连接失败 · \($0) · 自动重试" }
                 ?? "连接失败 · 自动重试"
         }
-        if !store.unavailable.isEmpty { return "部分行情缺失 · \(quoteAge ?? "自动重试")" }
+        if hasUnavailableQuotes { return "部分行情缺失 · \(quoteAge ?? "自动重试")" }
         if store.missingAuctionPrice { return "竞价参考价缺失 · 自动重试" }
-        if !store.invalidTracking.isEmpty { return "持仓或提醒配置异常 · 点击股票名称修正" }
+        if hasInvalidTracking { return "持仓或提醒配置异常 · 点击股票名称修正" }
         if let quoteAge {
             return "\(store.hasStaleQuotes ? "报价过旧" : store.marketSession.label) · \(quoteAge) · \(cadence)"
         }
@@ -866,7 +896,7 @@ struct WidgetView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if store.isAddingStock {
-                    TextField("名称自动搜，代码回车加", text: $newCode)
+                    TextField("\(store.selectedList.title)：名称或代码", text: $newCode)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12, design: .monospaced))
                         .focused($codeFocused)
@@ -916,13 +946,40 @@ struct WidgetView: View {
                         Image(systemName: "chart.xyaxis.line")
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(Color.accentColor)
-                        Text(store.isPreview ? "A股行情 · 测试预览" : "A股桌面行情")
-                            .font(.system(size: 13, weight: .semibold))
-                        Spacer()
+                            .frame(width: 18, height: 48)
+                            .overlay(WindowDraggingArea())
+                            .help(store.isPreview ? "A股行情 · 测试预览" : "A股桌面行情")
+                        HStack(spacing: 10) {
+                            ForEach(StockList.allCases, id: \.self) { list in
+                                Button { store.selectList(list) } label: {
+                                    Text(list.title)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(store.selectedList == list ? Color.primary : Color.secondary)
+                                        .padding(.horizontal, 2)
+                                        .frame(height: 28)
+                                        .overlay(alignment: .bottom) {
+                                            Capsule()
+                                                .fill(store.selectedList == list ? Color.accentColor : Color.clear)
+                                                .frame(height: 2)
+                                                .padding(.horizontal, 8)
+                                        }
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .modifier(StockListTabFocusAppearance())
+                                .help("显示" + list.title)
+                                .accessibilityLabel(list.title)
+                                .accessibilityValue(store.selectedList == list ? "已选中" : "未选中")
+                                .accessibilityAddTraits(store.selectedList == list ? .isSelected : [])
+                            }
+                        }
+                        .fixedSize()
+                        Spacer(minLength: 0)
+                            .frame(height: 48)
+                            .overlay(WindowDraggingArea())
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: 48)
-                    .overlay(WindowDraggingArea())
                 }
                 toolButton(store.isAddingStock ? "xmark" : "plus",
                            help: store.isAddingStock ? "收起输入框" : "追加股票") {
@@ -955,12 +1012,12 @@ struct WidgetView: View {
             Divider().opacity(0.6)
             MarketOverviewView(snapshot: store.marketOverview, notice: store.marketError, now: store.marketNow)
             Divider().opacity(0.6)
-            if store.symbols.isEmpty {
+            if store.visibleSymbols.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "plus.square.dashed")
                         .font(.system(size: 30, weight: .light))
                         .foregroundStyle(.secondary)
-                    Text("添加你关注的A股")
+                    Text(store.selectedList == .holdings ? "添加持仓股" : "添加自选股")
                         .font(.system(size: 15, weight: .medium))
                     Text("输入股票代码或中文简称，即可查看行情")
                         .font(.system(size: 12))
@@ -975,7 +1032,7 @@ struct WidgetView: View {
                 ScrollViewReader { scroll in
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(store.symbols) { symbol in
+                        ForEach(store.visibleSymbols) { symbol in
                             QuoteRow(symbol: symbol, quote: store.quotes[symbol.id],
                                      valuationPrice: store.valuationPrice(for: symbol), isAuction: store.isAuction,
                                      failed: store.errorMessage != nil,
@@ -1001,7 +1058,7 @@ struct WidgetView: View {
                                      chartNow: store.marketNow,
                                      showIntraday: { intraday(symbol) })
                                 .id(symbol.id)
-                            if symbol != store.symbols.last { Divider().padding(.horizontal, 16).opacity(0.6) }
+                            if symbol != store.visibleSymbols.last { Divider().padding(.horizontal, 16).opacity(0.6) }
                         }
                     }
                 }
@@ -1013,6 +1070,7 @@ struct WidgetView: View {
                     }
                 }
                 }
+                .id(store.selectedList)
             }
             Divider().opacity(0.6)
             HStack(spacing: 6) {
@@ -1029,7 +1087,7 @@ struct WidgetView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .layoutPriority(1)
-                    .help("单位：元。合计已填写持仓的股票，按各卡片当前显示价格计算；竞价时买一优先、卖一兜底，仅作参考。无持仓不计入；缺少持仓估值价或配置异常时显示—。总成本已含费用，不重复扣费。")
+                    .help("单位：元。只合计持仓股页签中已填写持仓的股票，切换页签不改变合计；竞价时买一优先、卖一兜底，仅作参考。无持仓不计入；缺少持仓估值价或配置异常时显示—。总成本已含费用，不重复扣费。")
                 Button(action: { store.refresh(forceMarket: true) }) {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -1053,6 +1111,9 @@ struct WidgetView: View {
         }
         .onChange(of: store.isAddingStock) { adding in
             if !adding { cancelSearch(); codeFocused = false; newCode = ""; additionError = nil }
+        }
+        .onChange(of: store.selectedList) { _ in
+            cancelSearch(); codeFocused = false; newCode = ""; additionError = nil
         }
         .onDisappear { cancelSearch() }
     }
@@ -1137,6 +1198,17 @@ struct WidgetView: View {
     }
 }
 
+private struct StockListTabFocusAppearance: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content.focusEffectDisabled()
+        } else {
+            content
+        }
+    }
+}
+
 final class DesktopPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -1183,6 +1255,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         createMenu()
         createPanel()
         subscriptions.append(store.$symbols.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.resizePanel() }
+        })
+        subscriptions.append(store.$watchlistSymbols.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.resizePanel() }
+        })
+        subscriptions.append(store.$selectedList.sink { [weak self] _ in
             DispatchQueue.main.async { self?.resizePanel() }
         })
         subscriptions.append(store.$backgroundTransparency.sink { [weak self] value in
