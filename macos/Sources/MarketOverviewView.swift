@@ -6,6 +6,7 @@ struct MarketOverviewView: View {
     let snapshot: MarketOverviewSnapshot?
     let notice: String?
     let now: Date
+    var showIndex = true
 
     private static let rising = Color(red: 0.85, green: 0.19, blue: 0.24)
     private static let falling = Color(red: 0.06, green: 0.59, blue: 0.38)
@@ -20,12 +21,16 @@ struct MarketOverviewView: View {
     var body: some View {
         VStack(spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("上证指数").foregroundStyle(.secondary)
-                Text(snapshot.map { String(format: "%.2f", $0.index.price) } ?? "—")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(indexColor)
-                Text(snapshot.map { String(format: "%+.2f%%", $0.index.changePercent) } ?? "—")
-                    .foregroundStyle(indexColor)
+                if showIndex {
+                    Text("上证指数").foregroundStyle(.secondary)
+                    Text(snapshot.map { String(format: "%.2f", $0.index.price) } ?? "—")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(indexColor)
+                    Text(snapshot.map { String(format: "%+.2f%%", $0.index.changePercent) } ?? "—")
+                        .foregroundStyle(indexColor)
+                } else {
+                    Text("全A涨跌").foregroundStyle(.secondary)
+                }
                 if let warning {
                     Circle().fill(.orange).frame(width: 4, height: 4)
                         .help(warning)
@@ -80,7 +85,7 @@ struct MarketOverviewView: View {
         var messages = [notice, snapshot?.comparisonNotice].compactMap { $0 }.filter { !$0.isEmpty }
         if let snapshot {
             let session = MarketClock.session(at: now)
-            if MarketClock.isStale(timestamp: snapshot.index.timestamp, at: now, session: session) {
+            if showIndex && MarketClock.isStale(timestamp: snapshot.index.timestamp, at: now, session: session) {
                 messages.append("上证指数报价较旧")
             }
             if MarketClock.isStale(timestamp: snapshot.market.timestamp, at: now, session: session) {
@@ -91,10 +96,11 @@ struct MarketOverviewView: View {
     }
 
     private var details: String {
-        var lines = ["全A：同花顺沪深京A股；上证指数：腾讯行情。", "交易时段大盘每3秒刷新，刷新频率不代表行情源实时性。"]
+        var lines = [showIndex ? "全A：同花顺沪深京A股；上证指数：腾讯行情。" : "全A：同花顺沪深京A股。",
+                     "交易时段大盘每3秒刷新，刷新频率不代表行情源实时性。"]
         if let snapshot {
             lines.append("全A源时间：" + Self.sourceTime.string(from: snapshot.market.timestamp))
-            lines.append("上证源时间：" + Self.sourceTime.string(from: snapshot.index.timestamp))
+            if showIndex { lines.append("上证源时间：" + Self.sourceTime.string(from: snapshot.index.timestamp)) }
             lines.append("统计股票：\(snapshot.market.total)只；成交额：\(Self.yi(snapshot.market.turnoverYuan))")
             if let comparison = snapshot.comparison {
                 lines.append("同花顺同刻分时采样：\(comparison.minute)；对比：\(comparison.previousDate)。分钟标签可能取整至下一分钟，时效以上述源时间为准。")

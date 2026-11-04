@@ -23,6 +23,7 @@ private final class StockListProtocol: URLProtocol, @unchecked Sendable {
             fields[1] = "offline-stock-list"; fields[2] = String(id.dropFirst(2))
             fields[3] = "12"; fields[4] = "10"; fields[30] = "20261026100000"
             fields[31] = "2"; fields[32] = "20"; fields[36] = "100"; fields[37] = "1"
+            fields[33] = "13"; fields[34] = "9"
             return "v_\(id)=\"\(fields.joined(separator: "~"))\";"
         }.joined(separator: "\n")
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200,
@@ -45,6 +46,7 @@ func runStockListTests() throws -> Int {
     let first = StockSymbol(code: "600108", market: "sh")
     let second = StockSymbol(code: "002580", market: "sz")
     let third = StockSymbol(code: "002491", market: "sz")
+    let index = StockSymbol(code: "980017", market: "sz")
     var checks = 0
     func check(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
         guard try condition() else { throw StockListTestFailure(message: message) }
@@ -63,22 +65,22 @@ func runStockListTests() throws -> Int {
         if let watchlist { result.set(watchlist, forKey: "watchlistSymbols") }
         return result
     }
-    func store(_ defaults: UserDefaults) -> QuoteStore {
+    func store(_ defaults: UserDefaults, at date: Date? = nil) -> QuoteStore {
         let client = QuoteClient(makeSession: { configuration in
             configuration.protocolClasses = [StockListProtocol.self]
             return URLSession(configuration: configuration)
         })
-        let value = QuoteStore(defaults: defaults, preview: nil, client: client, clock: { now })
+        let value = QuoteStore(defaults: defaults, preview: nil, client: client, clock: { date ?? now })
         value.suspend()
         stores.append(value)
         return value
     }
-    func quote(_ symbol: StockSymbol, price: Double = 12) -> Quote {
+    func quote(_ symbol: StockSymbol, price: Double = 12, at date: Date? = nil) -> Quote {
         Quote(symbol: symbol, name: "offline-list", price: price, previousClose: 10,
               change: price - 10, changePercent: (price - 10) * 10, volumeLots: 100, amountYuan: 1000,
-              timestamp: now, turnoverPercent: nil, volumeRatio: nil, amplitudePercent: nil)
+              timestamp: date ?? now, turnoverPercent: nil, volumeRatio: nil, amplitudePercent: nil)
     }
-    func spin(_ seconds: TimeInterval = 0.5, until condition: () -> Bool = { false }) {
+    func spin(_ seconds: TimeInterval = 1, until condition: () -> Bool) {
         let end = Date().addingTimeInterval(seconds)
         while Date() < end && !condition() { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) }
     }
@@ -86,12 +88,19 @@ func runStockListTests() throws -> Int {
         try JSONSerialization.jsonObject(with: defaults.data(forKey: "stockTracking")!) as! [String: Any]
     }
 
-    // Existing storage is the complete holdings list, including entries without a valid position.
-    let legacyDefaults = defaults(holdings: "600108,002580,002491")
+    let indexIDs = DashboardIndex.symbols.map(\.id)
+    try check(indexIDs.count == 8 && Set(indexIDs).count == indexIDs.count,
+              "综合指数固定目录包含8个独立指数")
+    try check(Set(["sz980017", "sh000688", "sz399006"]).isSubset(of: Set(indexIDs)),
+              "目录包含已核实的国证芯片、科创50、创业板指代码")
+    try check(StockList.allCases == [.holdings, .indices] && StockList.indices.title == "综合指数",
+              "自选页签由综合指数替代")
+
+    // Upgrade preserves old costs and undecodable records without activating the retired list.
+    let legacyDefaults = defaults(holdings: "600108", watchlist: "002580,002491")
     legacyDefaults.set(0.42, forKey: "backgroundTransparency")
     legacyDefaults.set(true, forKey: "pinned")
     legacyDefaults.set(false, forKey: "autoHideEnabled")
-    legacyDefaults.set("1.2", forKey: "buyCommissionRate")
     var precise = try StockTracking.parse(cost: "", quantity: "500", upper: "13", lower: "9",
                                          perShareCost: "10.12345678")
     precise.upperTriggered = true
@@ -104,167 +113,106 @@ func runStockListTests() throws -> Int {
         second.id: JSONSerialization.jsonObject(with: JSONEncoder().encode(invalid)), third.id: raw
     ]), forKey: "stockTracking")
     let legacy = store(legacyDefaults)
-    try check(legacy.selectedList == .holdings && legacy.symbols == [first, second, third],
-              "旧列表默认完整归入持仓页，不按持仓字段重新分组")
-    try check(legacy.watchlistSymbols.isEmpty && legacy.visibleSymbols == legacy.symbols,
-              "旧用户自选页初始为空，默认可见旧列表")
-    try check(legacy.tracking[first.id] == precise && legacy.invalidTracking[second.id] == invalid,
-              "升级保留精确成本、提醒触达状态和非法配置原字段")
-    try check(legacy.backgroundTransparency == 0.42 && legacy.isPinned && !legacy.autoHideEnabled
-              && legacy.buyCommissionRate == "1.2", "双页签不更改已有外观与佣金设置")
-    legacy.selectList(.watchlist)
+    try check(legacy.selectedList == .holdings && legacy.visibleSymbols == [first]
+              && legacy.allSymbols == [first], "升级默认显示持仓且不请求旧自选列表")
+    try check(legacy.legacyWatchlistSymbols == [second, third] && legacy.tracking[first.id] == precise,
+              "旧自选成员和精确持仓成本完整保留")
+    try check(legacy.backgroundTransparency == 0.42 && legacy.isPinned && !legacy.autoHideEnabled,
+              "替换页签不改已有外观设置")
     try legacy.addSymbols("600519")
+    legacy.removeSymbol(StockSymbol(code: "600519", market: "sh"))
+    try check(legacyDefaults.string(forKey: "watchlistSymbols") == "002580,002491",
+              "持仓增删不覆盖旧自选列表存储")
     try check((try records(legacyDefaults)[third.id] as? NSDictionary)?.isEqual(to: raw) == true,
-              "添加自选股票不能丢弃持仓页无法解码的原始记录")
-    let legacyReloaded = store(legacyDefaults)
-    try check(legacyReloaded.selectedList == .holdings && legacyReloaded.symbols == [first, second, third]
-              && legacyReloaded.watchlistSymbols.map(\.id) == ["sh600519"],
-              "两页独立恢复，重启始终默认持仓页")
-    try check(legacyReloaded.tracking[first.id] == precise && legacyReloaded.invalidTracking[second.id] == invalid,
-              "自选页保存后重启仍保留旧精确配置与异常值")
+              "持仓保存不改写旧自选无法解码的原始字段")
+    let reloaded = store(legacyDefaults)
+    try check(reloaded.symbols == [first] && reloaded.tracking[first.id] == precise
+              && reloaded.invalidTracking[second.id] == invalid,
+              "升级保存并重启后仍恢复持仓及旧异常配置")
 
-    let membershipDefaults = defaults(holdings: "600108")
-    let membership = store(membershipDefaults)
-    try membership.saveTracking(for: first, cost: "10", quantity: "100", upper: "11", lower: "",
-                                now: now.addingTimeInterval(-60))
-    membership.receive([first.id: quote(first)], requested: [first], at: now)
-    let triggered = membership.tracking[first.id]
-    membership.selectList(.watchlist)
-    try membership.addSymbols("600108,002580,002580")
-    try check(membership.symbols == [first] && membership.watchlistSymbols == [first, second]
-              && membership.allSymbols == [first, second], "自选增量添加只改当前页，并集按股票去重")
-    try check(membership.visibleSymbols == [first, second], "自选页显示自身顺序")
-    membership.removeSymbol(first)
-    try check(membership.symbols == [first] && membership.watchlistSymbols == [second]
-              && membership.tracking[first.id] == triggered && membership.quotes[first.id] != nil,
-              "从自选移除同股时保留持仓页、行情、成本和已触达提醒")
-    try membership.addSymbols("600108")
-    membership.selectList(.holdings)
-    membership.removeSymbol(first)
-    try check(membership.symbols.isEmpty && membership.watchlistSymbols == [second, first]
-              && membership.tracking[first.id] == triggered && membership.priceAlerts[first.id] != nil,
-              "从持仓移除同股时保留自选页配置和提醒显示")
-    try check(membership.totalPositionProfit == 0, "股票仅留自选后不再计入持仓总盈亏")
-    let membershipReloaded = store(membershipDefaults)
-    try check(membershipReloaded.symbols.isEmpty && membershipReloaded.watchlistSymbols == [second, first]
-              && membershipReloaded.tracking[first.id] == triggered,
-              "仅在自选的股票重启仍恢复精确配置和触达状态")
-    membership.selectList(.watchlist)
-    membership.removeSymbol(first)
-    try check(membership.tracking[first.id] == nil && membership.quotes[first.id] == nil
-              && membership.priceAlerts[first.id] == nil, "最后一个页签删除后清理共享配置、行情和提醒")
-    try check(try records(membershipDefaults)[first.id] == nil, "最后删除的配置不会在持久化中残留")
-    try membership.addSymbols("600108")
-    try check(membership.tracking[first.id] == nil && membership.quotes[first.id] == nil,
-              "最后删除后重新添加不会复活旧配置或报价")
-    try membership.saveSymbols("")
-    try check(membership.watchlistSymbols.isEmpty && membership.symbols.isEmpty,
-              "清空当前页可以持久化为空，不回填旧股票")
+    let board = store(defaults(holdings: "600108"))
+    try board.saveTracking(for: first, cost: "10", quantity: "100", upper: "", lower: "")
+    board.receive([first.id: quote(first)], requested: [first], at: now)
+    board.toggleIntraday(for: first)
+    board.expandedSymbolID = first.id
+    board.isAddingStock = true
+    board.selectList(.indices)
+    try check(board.visibleSymbols == DashboardIndex.symbols && board.listHeight == IndexDashboardView.height,
+              "指数页固定展示目录并使用看板高度")
+    try check(board.expandedChartSymbolID == nil && board.expandedSymbolID == nil && !board.isAddingStock,
+              "切到指数页收起持仓编辑、分时图和添加输入")
+    try check(board.totalPositionProfit == 200 && board.symbols == [first], "指数页不改变持仓总盈亏")
+    try rejects({ try board.addSymbols("002580") }, "指数页不允许追加股票")
+    try rejects({ try board.saveSymbols("") }, "指数页不允许清空固定目录")
+    board.removeSymbol(index)
+    try check(board.visibleSymbols == DashboardIndex.symbols && board.symbols == [first],
+              "删除操作不能改动固定指数或持仓列表")
+    try rejects({ try board.saveTracking(for: index, cost: "10", quantity: "100", upper: "13", lower: "") },
+                "固定指数不能保存持仓或价格提醒")
+    board.toggleIntraday(for: index)
+    try check(board.expandedChartSymbolID == index.id && board.listHeight == IndexDashboardView.expandedHeight,
+              "点击指数展开分时并增加看板视口高度")
+    let otherIndex = DashboardIndex.symbols.first { $0 != index }!
+    board.toggleIntraday(for: otherIndex)
+    try check(board.expandedChartSymbolID == otherIndex.id && board.intradaySnapshot == nil,
+              "切换指数只展开新图并清理前图")
+    board.toggleIntraday(for: otherIndex)
+    try check(board.expandedChartSymbolID == nil && board.listHeight == IndexDashboardView.height,
+              "再次点击当前指数收起分时并恢复看板高度")
+    board.receive([index.id: quote(index)], requested: DashboardIndex.symbols, at: now)
+    try check(board.quotes[index.id]?.price == 12
+              && board.unavailable == Set(indexIDs).subtracting([index.id]),
+              "部分指数响应保留可用点位并标记其余缺失指数")
+    board.selectList(.holdings)
+    try check(board.visibleSymbols == [first] && board.allSymbols == [first]
+              && board.totalPositionProfit == 200, "返回持仓页停止请求指数且保留持仓报价")
 
-    // Invalid and undecodable records obey the same cross-list membership lifetime.
-    legacy.selectList(.watchlist)
-    try legacy.addSymbols("002580,002491")
-    legacy.selectList(.holdings)
-    legacy.removeSymbol(second)
-    legacy.removeSymbol(third)
-    try check(legacy.invalidTracking[second.id] == invalid
-              && (try records(legacyDefaults)[third.id] as? NSDictionary)?.isEqual(to: raw) == true,
-              "异常与无法解码配置只剩自选成员时仍保留原字段")
-    legacy.selectList(.watchlist)
-    legacy.removeSymbol(second)
-    legacy.removeSymbol(third)
-    let cleaned = try records(legacyDefaults)
-    try check(legacy.invalidTracking[second.id] == nil && cleaned[second.id] == nil && cleaned[third.id] == nil,
-              "最后删除同时清理非法和无法解码记录")
-    try check(legacy.trackingStorageNotice == nil, "删除最后一条无法解码记录后解除存储提示")
-
-    let capacity = store(defaults())
-    let holdingCodes = (0..<20).map { String(format: "600%03d", $0) }.joined(separator: ",")
-    let watchingCodes = (20..<40).map { String(format: "600%03d", $0) }.joined(separator: ",")
-    try capacity.saveSymbols(holdingCodes)
-    capacity.selectList(.watchlist)
-    try capacity.saveSymbols(watchingCodes)
-    try check(capacity.symbols.count == 20 && capacity.watchlistSymbols.count == 20 && capacity.allSymbols.count == 40,
-              "两个页签各支持20只独立股票")
-    try rejects({ try capacity.addSymbols("002580") }, "自选第21只应拒绝")
-    capacity.selectList(.holdings)
-    try rejects({ try capacity.addSymbols("002580") }, "持仓第21只应拒绝")
-    try check(capacity.symbols.count == 20 && capacity.watchlistSymbols.count == 20,
-              "任一页超限失败不能影响另一页或原列表")
-    capacity.start()
-    spin(until: { capacity.quotes.count == 40 || capacity.errorMessage != nil })
-    try check(capacity.quotes.count == 40 && capacity.errorMessage == nil,
-              "40只并集通过真实QuoteClient加隔离传输完成批量解析")
-    try check(StockListProtocol.requests.last == capacity.allSymbols.map(\.id),
-              "批量报价请求覆盖两页去重并集")
-    capacity.stop()
-
-    let live = store(defaults(holdings: "600108", watchlist: "002580"))
+    let liveDefaults = defaults(holdings: "600108", watchlist: "002580")
+    var oldAlert = try StockTracking.parse(cost: "10", quantity: "100", upper: "11", lower: "")
+    oldAlert.armedAt = now.addingTimeInterval(-60)
+    liveDefaults.set(try JSONEncoder().encode([second.id: oldAlert]), forKey: "stockTracking")
+    let live = store(liveDefaults)
     try live.saveTracking(for: first, cost: "10", quantity: "100", upper: "11", lower: "",
-                          now: now.addingTimeInterval(-60))
-    live.selectList(.watchlist)
-    try live.saveTracking(for: second, cost: "9", quantity: "100", upper: "11", lower: "",
                           now: now.addingTimeInterval(-60))
     var alerts: [String] = []
     live.onPriceAlert = { alerts.append($0.symbolID) }
+    live.selectList(.indices)
     live.start()
-    spin(until: { live.quotes.count == 2 && !live.isRefreshing })
-    try check(live.quotes[first.id]?.price == 12 && live.quotes[second.id]?.price == 12,
-              "停留自选页时隐藏持仓页仍更新行情")
-    try check(Set(alerts) == Set([first.id, second.id]) && alerts.count == 2,
-              "隐藏页和可见页提醒都正常触发一次")
-    try check(live.totalPositionProfit == 200, "自选卡片虽能填成本，持仓总盈亏仍只计算持仓页")
-    live.selectList(.holdings)
-    try check(live.totalPositionProfit == 200, "切页不改变持仓总盈亏含义")
-    live.rearmAlerts(for: second, now: now.addingTimeInterval(-1))
-    live.refresh()
-    spin(until: { alerts.count == 3 && !live.isRefreshing })
-    try check(alerts.filter { $0 == first.id }.count == 1 && alerts.filter { $0 == second.id }.count == 2,
-              "切回持仓后隐藏自选仍提醒，另一只已触达状态不重置")
-    try live.saveSymbols("")
-    spin(until: { !live.isRefreshing && live.quotes.count == 1 })
-    try check(live.visibleSymbols.isEmpty && live.quotes[second.id]?.price == 12
-              && live.totalPositionProfit == 0, "清空可见持仓页仍保留隐藏自选行情")
-    let requestsBeforeTick = StockListProtocol.requests.count
-    spin(1.3, until: { StockListProtocol.requests.count > requestsBeforeTick })
-    try check(StockListProtocol.requests.count > requestsBeforeTick && StockListProtocol.requests.last == [second.id],
-              "当前页为空时，隐藏自选仍保持行情轮询")
+    spin(until: { live.quotes.count == 9 && !live.isRefreshing })
+    try check(live.quotes.count == 9 && live.errorMessage == nil
+              && StockListProtocol.requests.last == live.allSymbols.map(\.id),
+              "指数页批量刷新8个指数和隐藏持仓，沿用真实解析及隔离传输")
+    try check(live.quotes[first.id]?.price == 12 && live.totalPositionProfit == 200,
+              "查看指数时持仓行情和总盈亏继续更新")
+    try check(alerts == [first.id] && live.quotes[second.id] == nil,
+              "只触发持仓提醒，旧自选不请求也不提醒")
+    live.evaluateAlerts([second.id: quote(second)], now: now)
+    try check(alerts == [first.id] && live.tracking[second.id]?.upperTriggered == false,
+              "即使收到旧自选报价也不消耗旧提醒状态")
     live.stop()
 
-    for bad in [raw, try JSONSerialization.jsonObject(with: JSONEncoder().encode(invalid)) as! [String: Any]] {
-        let damagedDefaults = defaults(holdings: "600108", watchlist: "002580")
-        let held = try StockTracking.parse(cost: "10", quantity: "100", upper: "", lower: "")
-        damagedDefaults.set(try JSONSerialization.data(withJSONObject: [
-            first.id: JSONSerialization.jsonObject(with: JSONEncoder().encode(held)), second.id: bad
-        ]), forKey: "stockTracking")
-        let damaged = store(damagedDefaults)
-        damaged.receive([first.id: quote(first)], requested: damaged.allSymbols, at: now)
-        try check(damaged.totalPositionProfit == 200, "仅自选的非法或无法解码成本不能阻断持仓合计")
-        damaged.selectList(.watchlist)
-        try check(damaged.totalPositionProfit == 200, "自选异常配置不会在切页后改变持仓合计")
-        damaged.selectList(.holdings)
-        try damaged.addSymbols("002580")
-        try check(damaged.totalPositionProfit == nil, "同一坏配置加入持仓后必须阻断不完整合计")
-    }
+    let deduplicated = store(defaults(holdings: "sz980017,600108"))
+    deduplicated.selectList(.indices)
+    try check(deduplicated.allSymbols.count == 9
+              && deduplicated.allSymbols.filter({ $0 == index }).count == 1,
+              "历史持仓包含同一指数时批量请求去重")
+    let empty = store(defaults())
+    empty.selectList(.indices)
+    empty.start()
+    spin(until: { empty.quotes.count == 8 && !empty.isRefreshing })
+    try check(empty.quotes.count == 8 && empty.totalPositionProfit == 0,
+              "没有持仓也能独立加载指数看板")
+    empty.stop()
 
-    let layout = store(defaults(holdings: "600108,002580"))
-    layout.receive([first.id: quote(first), second.id: quote(second)], requested: layout.allSymbols, at: now)
-    layout.toggleIntraday(for: first)
-    layout.expandedSymbolID = first.id
-    layout.isAddingStock = true
-    try check(layout.expandedChartSymbolID == first.id, "切页测试先建立展开图表状态")
-    layout.selectList(.watchlist)
-    try check(layout.expandedChartSymbolID == nil && layout.expandedSymbolID == nil && !layout.isAddingStock,
-              "切页收起分时、持仓编辑和添加输入")
-    try check(layout.visibleSymbols.isEmpty && layout.listHeight == 198,
-              "自选空页使用空态高度，不沿用持仓列表高度")
-    try check(layout.quotes.count == 2 && layout.symbols == [first, second],
-              "切页不会清除隐藏页列表及已有行情")
-    try layout.addSymbols("002491")
-    try check(layout.visibleSymbols == [third] && layout.listHeight == 96,
-              "自选添加后高度仅由当前页卡片计算")
-    layout.selectList(.holdings)
-    try check(layout.visibleSymbols == [first, second] && layout.listHeight == 193,
-              "返回持仓页恢复其两张卡片高度")
+    let auctionTime = ISO8601DateFormatter().date(from: "2026-10-26T09:20:00+08:00")!
+    let auction = store(defaults(holdings: "600108"), at: auctionTime)
+    auction.selectList(.indices)
+    auction.receive([index.id: quote(index, at: auctionTime), first.id: quote(first, at: auctionTime)],
+                    requested: auction.allSymbols, at: auctionTime)
+    try check(auction.isAuction && auction.valuationPrice(for: index) == 12 && !auction.missingAuctionPrice,
+              "集合竞价指数直接显示点位，不要求不存在的买卖盘口")
+    auction.selectList(.holdings)
+    try check(auction.valuationPrice(for: first) == nil && auction.missingAuctionPrice,
+              "指数显示方式不改变个股竞价估值规则")
     return checks
 }

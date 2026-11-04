@@ -406,6 +406,66 @@ func runIntradayRefreshTests() throws -> Int {
         quiet.stop()
     }
 
+    let (indices, indexClient, indexClock) = fixture()
+    let indexA = DashboardIndex.symbols[0], indexB = DashboardIndex.symbols[1]
+    indices.selectList(.indices)
+    indices.toggleIntraday(for: indexA)
+    spin(until: { indices.intradaySnapshot != nil })
+    try check(indexClient.symbols == [indexA] && indices.intradaySnapshot?.symbol == indexA
+              && indices.intradaySnapshot?.isOpeningAuction == false,
+              "指数卡片展开后请求普通分钟接口并显示完整分时")
+    indexClient.append(.init(snapshot(indexA, at: indexClock.now(), price: 71), delay: 0.18))
+    indices.refresh(forceMarket: true)
+    spin(0.05, until: { indexClient.count == 2 })
+    indexClient.append(.init(snapshot(indexB, at: indexClock.now(), price: 72)))
+    indices.toggleIntraday(for: indexB)
+    spin(0.25)
+    try check(indexClient.symbols == [indexA, indexA, indexB]
+              && indices.expandedChartSymbolID == indexB.id
+              && indices.intradaySnapshot?.symbol == indexB
+              && indices.intradaySnapshot?.points.last?.price == 72 && !indices.isIntradayRefreshing,
+              "切换指数取消前图，忽略旧指数晚到响应")
+    indexClient.append(.init(snapshot(indexB, at: indexClock.now(), price: 73), delay: 0.15))
+    indices.refresh(forceMarket: true)
+    spin(0.05, until: { indexClient.count == 4 })
+    indices.toggleIntraday(for: indexB)
+    spin(0.2)
+    try check(indices.expandedChartSymbolID == nil && indices.intradaySnapshot == nil
+              && !indices.isIntradayRefreshing && indices.intradayError == nil,
+              "收起指数后晚到分钟响应不能恢复图表")
+    indexClient.append(.init(snapshot(indexA, at: indexClock.now(), price: 74), delay: 0.15))
+    indices.toggleIntraday(for: indexA)
+    spin(0.05, until: { indexClient.count == 5 })
+    indices.selectList(.holdings)
+    spin(0.2)
+    try check(indices.expandedChartSymbolID == nil && indices.intradaySnapshot == nil
+              && !indices.isIntradayRefreshing, "切回持仓页取消指数分时且拒绝晚到数据")
+    indices.stop()
+
+    for time in ["09:20:00", "09:26:00"] {
+        let (preopenIndex, preopenClient, preopenClock) = fixture(at: date(time))
+        preopenIndex.selectList(.indices)
+        let previousSession = date("15:00:00", day: "2026-10-23")
+        preopenClient.append(.init(snapshot(indexA, at: previousSession, price: 75, minute: 900)))
+        preopenIndex.toggleIntraday(for: indexA)
+        spin(until: { preopenIndex.intradaySnapshot != nil })
+        try check(preopenClient.symbols == [indexA] && preopenIndex.intradaySnapshot?.symbol == indexA
+                  && preopenIndex.intradaySnapshot?.isOpeningAuction == false
+                  && preopenIndex.intradaySnapshot?.timestamp == previousSession,
+                  "\(time)指数仍请求普通分钟接口，不使用个股集合竞价采样")
+        preopenClock.advance(1)
+        let indexQuote = Quote(symbol: indexA, name: "offline-index", price: 9000, previousClose: 8000,
+                               change: 1000, changePercent: 12.5, volumeLots: 0, amountYuan: 0,
+                               timestamp: preopenClock.now(), turnoverPercent: nil, volumeRatio: nil,
+                               amplitudePercent: nil, bidPrice: 8999, askPrice: 9001)
+        preopenIndex.receive([indexA.id: indexQuote], requested: [indexA], at: preopenClock.now())
+        try check(preopenIndex.intradaySnapshot?.timestamp == previousSession
+                  && preopenIndex.intradaySnapshot?.points.last?.price == 75
+                  && preopenIndex.intradaySnapshot?.isOpeningAuction == false,
+                  "\(time)实时报价不会把指数普通分时覆盖成竞价采样")
+        preopenIndex.stop()
+    }
+
     let twenty = (0..<20).map { String(format: "600%03d", $0) }.joined(separator: ",")
     let (capacity, capacityClient, _) = fixture(symbols: twenty)
     capacity.toggleIntraday(for: capacity.symbols[0])
