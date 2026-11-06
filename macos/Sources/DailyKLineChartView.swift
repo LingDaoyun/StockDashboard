@@ -12,6 +12,7 @@ struct DailyKLineChartView: View {
     var annotationStore = DailyChartAnnotationStore()
 
     @State private var inspectedID: String?
+    @State private var pointerLocation: CGPoint?
     @State private var viewport = DailyChartViewport()
     @State private var tool: DailyChartTool = .browse
     @State private var annotations: [DailyChartAnnotation] = []
@@ -181,6 +182,7 @@ struct DailyKLineChartView: View {
                 Button("最近60日") {
                     viewport.reset()
                     inspectedID = nil
+                    pointerLocation = nil
                     panRemainder = 0
                 }
             }
@@ -220,6 +222,7 @@ struct DailyKLineChartView: View {
 
     private func loadWorkspace() {
         inspectedID = nil
+        pointerLocation = nil
         viewport.reset()
         tool = .browse
         cancelDraft()
@@ -239,9 +242,11 @@ struct DailyKLineChartView: View {
         guard let location, !candles.isEmpty,
               location.x >= plot.minX, location.x <= plot.maxX else {
             inspectedID = nil
+            pointerLocation = nil
             draftEnd = nil
             return
         }
+        pointerLocation = plot.contains(location) ? location : nil
         let index = min(candles.count - 1, Int((location.x - plot.minX) / plot.width * CGFloat(candles.count)))
         inspectedID = candles[index].id
         if interactive, draftStart != nil { draftEnd = anchor(at: location, in: size) }
@@ -250,6 +255,7 @@ struct DailyKLineChartView: View {
     private func zoom(by factor: Double) {
         viewport.zoom(by: factor, anchor: 0.5, dates: dates)
         inspectedID = nil
+        pointerLocation = nil
         panRemainder = 0
     }
 
@@ -282,6 +288,7 @@ struct DailyKLineChartView: View {
 
     private func addAnnotation(at location: CGPoint, in size: CGSize) {
         guard interactive, loadedWorkspace == workspace else { return }
+        inspect(location, in: size)
         let plot = priceRect(in: size)
         if draftStart == nil, let selected = DailyChartAnnotationHitTest.hit(
             at: location, annotations: annotations, plot: plot,
@@ -457,10 +464,16 @@ struct DailyKLineChartView: View {
         }
 
         if let inspectedID, let index = candles.firstIndex(where: { $0.id == inspectedID }) {
-            let selectedX = x(index)
+            let crosshair = interactive && tool != .browse
+                ? pointerLocation.flatMap { plot.contains($0) ? $0 : nil } : nil
+            let selectedX = crosshair?.x ?? x(index)
             let cursor = Path { path in
                 path.move(to: CGPoint(x: selectedX, y: plot.minY))
                 path.addLine(to: CGPoint(x: selectedX, y: volume.maxY))
+                if let crosshair {
+                    path.move(to: CGPoint(x: plot.minX, y: crosshair.y))
+                    path.addLine(to: CGPoint(x: plot.maxX, y: crosshair.y))
+                }
             }
             context.stroke(cursor, with: .color(Self.cursor.opacity(0.6)), style: StrokeStyle(lineWidth: 0.7, dash: [2, 2]))
         }
