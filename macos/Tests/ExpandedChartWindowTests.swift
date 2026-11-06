@@ -14,7 +14,7 @@ func runExpandedChartWindowTests() throws -> Int {
     let defaults = UserDefaults(suiteName: domain)!
     let store = QuoteStore(defaults: defaults, preview: "600108,002580")
     store.suspend()
-    let controller = ExpandedChartWindow(store: store)
+    let controller = ExpandedChartWindow(store: store, annotationStore: DailyChartAnnotationStore(defaults: defaults))
     defer {
         controller.window?.orderOut(nil)
         controller.close()

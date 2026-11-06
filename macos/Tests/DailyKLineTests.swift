@@ -102,15 +102,18 @@ enum DailyKLineTests {
                    "平价且零成交量K线有效")
 
         formatter.dateFormat = "yyyy-MM-dd"
-        let start = formatter.date(from: "2026-08-01")!
-        let history = (0..<61).map { offset -> [String] in
+        let start = formatter.date(from: "2022-01-01")!
+        let history = (0..<1001).map { offset -> [String] in
             var row = rows[0]
             row[0] = formatter.string(from: start.addingTimeInterval(Double(offset) * 86400))
             return row
         }
+        let expanded = try DailyKLineParser.parse(fixture(rows: Array(history.prefix(120))), symbol: symbol)
+        try expect(expanded.candles.count == 120 && expanded.candles.first?.date == history[0][0]
+                   && expanded.candles.last?.date == history[119][0], "保留超过60根的完整历史供大图缩放")
         let bounded = try DailyKLineParser.parse(fixture(rows: history), symbol: symbol)
-        try expect(bounded.candles.count == 60 && bounded.candles.first?.date == history[1][0]
-                   && bounded.candles.last?.date == history.last?[0], "源返回61根时只保留最近60个实际记录")
+        try expect(bounded.candles.count == 1000 && bounded.candles.first?.date == history[1][0]
+                   && bounded.candles.last?.date == history.last?[0], "源追加当日记录超过上限时保留最新1000根")
         for bad in ["", "NaN", "inf", "-inf", "bad", "0", "-1"] {
             for column in 1...4 {
                 var row = rows[0]; row[column] = bad
@@ -166,7 +169,7 @@ enum DailyKLineTests {
             let url = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
             try expect(url.scheme == "https" && url.host == "web.ifzq.gtimg.cn"
                        && url.path == "/appstock/app/fqkline/get"
-                       && url.queryItems == [URLQueryItem(name: "param", value: "sh600108,day,,,60,qfq")], "仅向固定腾讯接口发送股票代码和日线参数")
+                       && url.queryItems == [URLQueryItem(name: "param", value: "sh600108,day,,,1000,qfq")], "向原腾讯接口一次请求1000根日线历史")
             try expect(request.httpMethod == "GET" && request.httpBody == nil
                        && request.cachePolicy == .reloadIgnoringLocalCacheData, "日K请求不发送持仓数据")
         }
@@ -202,7 +205,7 @@ enum DailyKLineTests {
         for id in ids {
             let stock = try StockSymbol.parseList(id)[0]
             let snapshot = try await client.fetch(stock)
-            try expect(snapshot.symbol == stock && (1...60).contains(snapshot.candles.count), "实盘日线响应有效：\(id)")
+            try expect(snapshot.symbol == stock && (1...DailyKLineClient.historyLimit).contains(snapshot.candles.count), "实盘日线响应有效：\(id)")
             print("LIVE: \(id) \(snapshot.adjustment) \(snapshot.candles.count)根 \(snapshot.candles.first!.date)…\(snapshot.candles.last!.date)")
         }
     }

@@ -7,7 +7,7 @@ final class ExpandedChartWindow: NSWindowController {
     private let store: QuoteStore
     private var selection: AnyCancellable?
 
-    init(store: QuoteStore) {
+    init(store: QuoteStore, annotationStore: DailyChartAnnotationStore = DailyChartAnnotationStore()) {
         self.store = store
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 900, height: 540),
                             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -16,7 +16,7 @@ final class ExpandedChartWindow: NSWindowController {
         panel.hidesOnDeactivate = false
         panel.level = .floating
         panel.contentMinSize = NSSize(width: 560, height: 360)
-        panel.contentView = NSHostingView(rootView: ExpandedChartView(store: store))
+        panel.contentView = NSHostingView(rootView: ExpandedChartView(store: store, annotationStore: annotationStore))
         super.init(window: panel)
         selection = store.$expandedChartSymbolID.combineLatest(store.$chartKind).sink { [weak self] _ in
             DispatchQueue.main.async { self?.updateSelection() }
@@ -50,6 +50,7 @@ final class ExpandedChartWindow: NSWindowController {
 
 private struct ExpandedChartView: View {
     @ObservedObject var store: QuoteStore
+    let annotationStore: DailyChartAnnotationStore
 
     var body: some View {
         GeometryReader { geometry in
@@ -57,7 +58,8 @@ private struct ExpandedChartView: View {
                 if store.chartKind == .dailyKLine {
                     DailyKLineChartView(snapshot: store.dailyKLineSnapshot, error: store.dailyKLineError,
                                        isRefreshing: store.isDailyKLineRefreshing,
-                                       chartHeight: max(220, geometry.size.height - 32))
+                                       chartHeight: max(220, geometry.size.height - 32),
+                                       interactive: true, annotationStore: annotationStore)
                 } else {
                     IntradayChartView(snapshot: store.intradaySnapshot, error: store.intradayError,
                                       isRefreshing: store.isIntradayRefreshing, now: store.marketNow,

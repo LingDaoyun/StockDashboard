@@ -79,8 +79,8 @@ enum DailyKLineParser {
             candles.append(DailyCandle(date: row[0], open: open, close: close,
                                        high: high, low: low, volumeLots: volume))
         }
-        // The service can append today's candle to the requested 60 historical rows.
-        return DailyKLineSnapshot(symbol: symbol, candles: Array(candles.suffix(60)),
+        // The service can append today's candle to the requested historical rows.
+        return DailyKLineSnapshot(symbol: symbol, candles: Array(candles.suffix(DailyKLineClient.historyLimit)),
                                   adjustment: key == "qfqday" ? "前复权" : "不复权", timestamp: timestamp)
     }
 
@@ -91,6 +91,7 @@ enum DailyKLineParser {
 }
 
 final class DailyKLineClient: DailyKLineFetching, Sendable {
+    static let historyLimit = 1000
     private let session: URLSession
 
     init(makeSession: (URLSessionConfiguration) -> URLSession = { URLSession(configuration: $0) }) {
@@ -107,7 +108,7 @@ final class DailyKLineClient: DailyKLineFetching, Sendable {
     func fetch(_ symbol: StockSymbol) async throws -> DailyKLineSnapshot {
         let normalized = try StockSymbol.parseList(symbol.id)
         guard normalized.count == 1, normalized[0] == symbol else { throw QuoteError.invalidSymbol(symbol.id) }
-        let url = URL(string: "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=" + symbol.id + ",day,,,60,qfq")!
+        let url = URL(string: "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=" + symbol.id + ",day,,,\(Self.historyLimit),qfq")!
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 6)
         request.httpMethod = "GET"
         let data: Data

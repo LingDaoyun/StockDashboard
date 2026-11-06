@@ -475,6 +475,7 @@ struct WatchlistTests {
         print("PASS: \(try runDailyKLineRefreshTests()) daily K-line refresh assertions")
         print("PASS: \(try runPerShareEntryTests()) per-share entry assertions")
         print("PASS: \(try runExpandedChartWindowTests()) expanded-chart window assertions")
+        print("PASS: \(try runDailyChartSelectionTests()) chart selection integration assertions")
         print("PASS: \(try runStockListTests()) stock-list assertions")
     }
 }

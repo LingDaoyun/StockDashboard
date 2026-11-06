@@ -9,6 +9,10 @@ xcrun swiftc -swift-version 6 Sources/Quotes.swift Sources/MarketClock.swift Sou
 "$test_dir/intraday-tests"
 xcrun swiftc -swift-version 6 Sources/Quotes.swift Sources/DailyKLine.swift Tests/DailyKLineTests.swift -o "$test_dir/daily-kline-tests"
 "$test_dir/daily-kline-tests" "$@"
+xcrun swiftc -swift-version 6 Sources/DailyChartWorkspace.swift Tests/DailyChartWorkspaceTests.swift -o "$test_dir/daily-chart-workspace-tests"
+"$test_dir/daily-chart-workspace-tests"
+xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 Sources/DailyChartInteraction.swift Tests/DailyChartInteractionTests.swift -o "$test_dir/daily-chart-interaction-tests"
+"$test_dir/daily-chart-interaction-tests"
 xcrun swiftc -swift-version 6 Sources/Quotes.swift Tests/QuoteClientTests.swift -o "$test_dir/quote-client-tests"
 "$test_dir/quote-client-tests"
 xcrun swiftc -swift-version 6 Sources/Quotes.swift Sources/StockSearch.swift Tests/StockSearchTests.swift -o "$test_dir/stock-search-tests"
@@ -25,6 +29,6 @@ xcrun swiftc -swift-version 6 Sources/EdgeGeometry.swift Tests/EdgeGeometryTests
 "$test_dir/edge-geometry-tests"
 xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 Sources/EdgeGeometry.swift Sources/EdgeDocking.swift Tests/EdgeDockingTests.swift -o "$test_dir/edge-docking-tests"
 "$test_dir/edge-docking-tests"
-xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 Sources/Quotes.swift Sources/Intraday.swift Sources/IntradayChartView.swift Sources/DailyKLine.swift Sources/DailyKLineChartView.swift Sources/ExpandedChart.swift Sources/StockSearch.swift Sources/MarketClock.swift Sources/MarketOverview.swift Sources/MarketOverviewView.swift Sources/IndexDashboard.swift Sources/Tracking.swift Sources/Fees.swift Sources/TrackingViews.swift Sources/EdgeGeometry.swift Sources/EdgeDocking.swift Sources/WindowDragging.swift Sources/DesktopApp.swift Tests/WatchlistTests.swift Tests/TotalProfitTests.swift Tests/RefreshTests.swift Tests/MarketRefreshTests.swift Tests/IntradayRefreshTests.swift Tests/DailyKLineRefreshTests.swift Tests/PerShareEntryTests.swift Tests/ExpandedChartWindowTests.swift Tests/StockListTests.swift -o "$test_dir/watchlist-tests"
+xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 Sources/Quotes.swift Sources/Intraday.swift Sources/IntradayChartView.swift Sources/DailyKLine.swift Sources/DailyChartWorkspace.swift Sources/DailyChartInteraction.swift Sources/DailyKLineChartView.swift Sources/ExpandedChart.swift Sources/StockSearch.swift Sources/MarketClock.swift Sources/MarketOverview.swift Sources/MarketOverviewView.swift Sources/IndexDashboard.swift Sources/Tracking.swift Sources/Fees.swift Sources/TrackingViews.swift Sources/EdgeGeometry.swift Sources/EdgeDocking.swift Sources/WindowDragging.swift Sources/DesktopApp.swift Tests/WatchlistTests.swift Tests/TotalProfitTests.swift Tests/RefreshTests.swift Tests/MarketRefreshTests.swift Tests/IntradayRefreshTests.swift Tests/DailyKLineRefreshTests.swift Tests/PerShareEntryTests.swift Tests/ExpandedChartWindowTests.swift Tests/DailyChartSelectionTests.swift Tests/StockListTests.swift -o "$test_dir/watchlist-tests"
 "$test_dir/watchlist-tests"
 ./Tests/BuildSafetyTests.sh
