@@ -237,7 +237,7 @@ struct WatchlistTests {
         check(legacyFeeStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "41016.80")
               && legacyFeeStore.tracking[primary.id]?.purchaseAmountYuan == nil
               && legacyFeeStore.tracking[primary.id]?.purchaseCommissionRate == nil,
-              "明确校准含费成本仍保存实际金额并清除预估来源")
+              "明确修改含费成本仍保存实际金额并清除预估来源")
         try exactStore.savePosition(for: primary, amount: "40007.59", quantity: "4000", upper: "13", lower: "",
                                     estimateFees: false, commissionRate: "abc")
         check(exactStore.tracking[primary.id]?.totalCostYuan == Decimal(string: "40007.59") && exactStore.tracking[primary.id]?.purchaseAmountYuan == nil, "实际含费总成本不再扣费，也不再标记预估")
@@ -435,11 +435,46 @@ struct WatchlistTests {
         let invalidPerShareStore = QuoteStore(defaults: perShareDefaults, preview: nil)
         invalidPerShareStore.suspend()
         check(invalidPerShareStore.totalPositionProfit == nil, "缺股数的每股成本配置不能被遗漏后显示零合计")
+        let totalCostDomain = "cn.local.AShareDesktop.total-cost-tests.\(UUID().uuidString)"
+        let totalCostDefaults = UserDefaults(suiteName: totalCostDomain)!
+        defer { totalCostDefaults.removePersistentDomain(forName: totalCostDomain) }
+        totalCostDefaults.set("600121", forKey: "symbols")
+        let totalCostStore = QuoteStore(defaults: totalCostDefaults, preview: nil, clock: { Date(timeIntervalSince1970: 101) })
+        totalCostStore.suspend()
+        let totalCostSymbol = totalCostStore.symbols[0]
+        try totalCostStore.savePosition(for: totalCostSymbol, amount: "18763.07",
+                                        quantity: "4500", upper: "", lower: "", estimateFees: false, commissionRate: "unused")
+        let totalCostPosition = totalCostStore.tracking[totalCostSymbol.id]!
+        check(totalCostPosition.totalCostYuan == Decimal(string: "18763.07")
+              && totalCostPosition.profit(at: 4.22)?.amountText == "+226.93",
+              "直接输入总成本经持仓保存后保留分精度，不追加手续费")
+        check(totalCostPosition.purchaseAmountYuan == nil && totalCostPosition.perShareCostYuan == nil,
+              "实填总成本不保留互斥成本来源")
+        let totalCostReloaded = QuoteStore(defaults: totalCostDefaults, preview: nil)
+        totalCostReloaded.suspend()
+        check(totalCostReloaded.tracking[totalCostSymbol.id] == totalCostPosition,
+              "总成本通过重启读取和验证后保持一致")
+        try totalCostStore.savePosition(for: totalCostSymbol, amount: "", quantity: "4500", upper: "5", lower: "",
+                                        estimateFees: true, commissionRate: "unused")
+        check(totalCostStore.tracking[totalCostSymbol.id]?.totalCostYuan == Decimal(string: "18763.07"),
+              "未填新买入金额、仅修改提醒时保留原精确成本")
+        for amount in ["0.00", "-123.45"] {
+            try totalCostStore.savePosition(for: totalCostSymbol, amount: amount, quantity: "4500", upper: "", lower: "",
+                                            estimateFees: false, commissionRate: "unused")
+            let restored = QuoteStore(defaults: totalCostDefaults, preview: nil)
+            restored.suspend()
+            let held = restored.tracking[totalCostSymbol.id]!
+            check(held.totalCostYuan == Decimal(string: amount) && held.profit(at: 4.22)?.percent == nil,
+                  "做T后的非正总成本重启有效，盈亏率不做无意义除法")
+        }
         print("PASS: \(count) watchlist assertions")
         print("PASS: \(try runTotalProfitTests()) total-profit assertions")
         print("PASS: \(try runRefreshTests()) refresh assertions")
         print("PASS: \(try runMarketRefreshTests()) market refresh assertions")
         print("PASS: \(try runIntradayRefreshTests()) intraday refresh assertions")
+        print("PASS: \(try runDailyKLineRefreshTests()) daily K-line refresh assertions")
+        print("PASS: \(try runPerShareEntryTests()) per-share entry assertions")
+        print("PASS: \(try runExpandedChartWindowTests()) expanded-chart window assertions")
         print("PASS: \(try runStockListTests()) stock-list assertions")
     }
 }

@@ -39,26 +39,35 @@ struct StockTracking: Codable, Equatable {
         effectiveCostYuan.map { yuanText($0, showSign: false) } ?? ""
     }
 
+    var perShareCostInputText: String {
+        if let perShareCostYuan {
+            return perShareCostYuan.isNaN ? "" : NSDecimalNumber(decimal: perShareCostYuan).stringValue
+        }
+        var cost: Decimal
+        if let totalCostYuan, let quantity, quantity > 0 {
+            cost = totalCostYuan / Decimal(quantity)
+        } else if let costPrice, costPrice.isFinite,
+                  let legacy = Decimal(string: String(costPrice), locale: Locale(identifier: "en_US_POSIX")) {
+            cost = legacy
+        } else { return "" }
+        guard !cost.isNaN else { return "" }
+        var rounded = Decimal()
+        NSDecimalRound(&rounded, &cost, 8, .plain)
+        return NSDecimalNumber(decimal: rounded).stringValue
+    }
+
     static func parse(cost: String, quantity: String, upper: String, lower: String, totalCost: String = "", purchaseAmount: String = "", purchaseCommissionRate: Decimal? = nil, perShareCost: String = "") throws -> StockTracking {
         let costText = cost.trimmingCharacters(in: .whitespacesAndNewlines)
-        let quantityText = quantity.trimmingCharacters(in: .whitespacesAndNewlines)
         let perShareCostYuan = try perShareCostAmount(perShareCost)
-        var costPrice = perShareCostYuan == nil ? try price(costText, label: "成本价") : nil
-        let totalCostYuan = try totalCostAmount(totalCost)
+        let totalCostYuan = try totalCostAmount(totalCost, allowNonpositive: true)
+        var costPrice = perShareCostYuan == nil && totalCostYuan == nil ? try price(costText, label: "成本价") : nil
         let purchaseAmountYuan = try totalCostAmount(purchaseAmount, label: "成交金额")
         guard perShareCostYuan == nil || (totalCostYuan == nil && purchaseAmountYuan == nil && purchaseCommissionRate == nil) else {
             throw TrackingError.invalidInput("每股成本和买入金额、持仓总成本不能同时填写。")
         }
-        var quantityValue: Int?
-        if !quantityText.isEmpty {
-            guard quantityText.utf8.allSatisfy({ (48...57).contains($0) }),
-                  let value = Int(quantityText), value > 0 else {
-                throw TrackingError.invalidInput("持仓股数请输入正整数，单位为股。")
-            }
-            quantityValue = value
-            if let costPrice, !(costPrice * Double(value)).isFinite {
-                throw TrackingError.invalidInput("总成本过大，请检查成本价和持仓股数。")
-            }
+        let quantityValue = try shareCount(quantity)
+        if let quantityValue, let costPrice, !(costPrice * Double(quantityValue)).isFinite {
+            throw TrackingError.invalidInput("总成本过大，请检查成本价和持仓股数。")
         }
         guard (costPrice != nil || totalCostYuan != nil || perShareCostYuan != nil) == (quantityValue != nil) else {
             throw TrackingError.invalidInput("持仓总成本和持仓股数需同时填写，或同时留空。")
@@ -76,7 +85,7 @@ struct StockTracking: Codable, Equatable {
         }
         if let totalCostYuan, let quantityValue {
             let average = NSDecimalNumber(decimal: totalCostYuan / Decimal(quantityValue)).doubleValue
-            guard average.isFinite, average > 0 else {
+            guard average.isFinite else {
                 throw TrackingError.invalidInput("总成本过大，请检查持仓总成本和持仓股数。")
             }
             costPrice = average
@@ -137,7 +146,7 @@ struct StockTracking: Codable, Equatable {
             return Self.precisePerShareTotal(perShareCostYuan, quantity: quantity)
         }
         if let totalCostYuan {
-            guard (try? Self.totalCostAmount(NSDecimalNumber(decimal: totalCostYuan).stringValue)) == totalCostYuan else { return nil }
+            guard (try? Self.totalCostAmount(NSDecimalNumber(decimal: totalCostYuan).stringValue, allowNonpositive: true)) == totalCostYuan else { return nil }
             return totalCostYuan
         }
         guard let costPrice, costPrice.isFinite, costPrice > 0,
@@ -179,20 +188,33 @@ struct StockTracking: Codable, Equatable {
         return value
     }
 
-    private static func totalCostAmount(_ text: String, label: String = "持仓总成本") throws -> Decimal? {
+    private static func shareCount(_ text: String) throws -> Int? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let pattern = #"^(?:[0-9]+(?:\.[0-9]{1,2})?|\.[0-9]{1,2})$"#
+        guard trimmed.utf8.allSatisfy({ (48...57).contains($0) }),
+              let value = Int(trimmed), value > 0 else {
+            throw TrackingError.invalidInput("持仓股数请输入正整数，单位为股。")
+        }
+        return value
+    }
+
+    private static func totalCostAmount(_ text: String, label: String = "持仓总成本", allowNonpositive: Bool = false) throws -> Decimal? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let signPattern = allowNonpositive ? "-?" : ""
+        let pattern = "^" + signPattern + #"(?:[0-9]+(?:\.[0-9]{1,2})?|\.[0-9]{1,2})$"#
         guard let range = trimmed.range(of: pattern, options: .regularExpression),
               range == trimmed.startIndex..<trimmed.endIndex,
               let value = Decimal(string: trimmed, locale: Locale(identifier: "en_US_POSIX")),
-              !value.isNaN, value > 0 else {
-            throw TrackingError.invalidInput("\(label)请输入大于0、最多2位小数的金额，不支持科学记数法。")
+              !value.isNaN, allowNonpositive || value > 0 else {
+            let constraint = allowNonpositive ? "最多2位小数的有效金额，允许0或负数" : "大于0、最多2位小数的金额"
+            throw TrackingError.invalidInput("\(label)请输入\(constraint)，不支持科学记数法。")
         }
-        let parts = trimmed.split(separator: ".", omittingEmptySubsequences: false)
+        let magnitude = trimmed.hasPrefix("-") ? String(trimmed.dropFirst()) : trimmed
+        let parts = magnitude.split(separator: ".", omittingEmptySubsequences: false)
         let integer = String(parts[0].drop(while: { $0 == "0" }))
         let fraction = parts.count > 1 ? String(parts[1].reversed().drop(while: { $0 == "0" }).reversed()) : ""
-        let canonical = (integer.isEmpty ? "0" : integer) + (fraction.isEmpty ? "" : "." + fraction)
+        let canonical = (value < 0 ? "-" : "") + (integer.isEmpty ? "0" : integer) + (fraction.isEmpty ? "" : "." + fraction)
         guard NSDecimalNumber(decimal: value).stringValue == canonical else {
             throw TrackingError.invalidInput("\(label)过大，无法精确保存到分，请检查金额。")
         }

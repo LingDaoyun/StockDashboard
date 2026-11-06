@@ -4,13 +4,18 @@ import Combine
 import UserNotifications
 
 private let quoteRowHeight: CGFloat = 96
-private let trackingEditorHeight: CGFloat = 220
+private let trackingEditorHeight: CGFloat = 192
 private let intradaySectionHeight: CGFloat = IntradayChartView.height + 12
 
 enum StockList: String, CaseIterable {
     case holdings, indices
 
     var title: String { self == .holdings ? "持仓股" : "综合指数" }
+}
+
+enum ChartKind {
+    case intraday, dailyKLine
+    var title: String { self == .intraday ? "分时" : "日K" }
 }
 
 @MainActor
@@ -28,9 +33,13 @@ final class QuoteStore: ObservableObject {
     @Published private(set) var marketError: String?
     @Published private(set) var isMarketRefreshing = false
     @Published private(set) var expandedChartSymbolID: String?
+    @Published private(set) var chartKind: ChartKind = .intraday
     @Published private(set) var intradaySnapshot: IntradaySnapshot?
     @Published private(set) var intradayError: String?
     @Published private(set) var isIntradayRefreshing = false
+    @Published private(set) var dailyKLineSnapshot: DailyKLineSnapshot?
+    @Published private(set) var dailyKLineError: String?
+    @Published private(set) var isDailyKLineRefreshing = false
     @Published private(set) var marketNow: Date
     @Published var isAddingStock = false
     @Published var isAdjustingTransparency = false
@@ -61,6 +70,8 @@ final class QuoteStore: ObservableObject {
     private var lastMarketAttempt: Date?
     private var intradayRequest: Task<Void, Never>?
     private var lastIntradayAttempt: Date?
+    private var dailyKLineRequest: Task<Void, Never>?
+    private var lastDailyKLineAttempt: Date?
     private var openingAuctionHistory = OpeningAuctionHistory()
     private var activity: NSObjectProtocol?
     private var suspended = false
@@ -68,6 +79,7 @@ final class QuoteStore: ObservableObject {
     private let client: QuoteClient
     private let marketClient: (any MarketOverviewFetching)?
     private let intradayClient: (any IntradayFetching)?
+    private let dailyKLineClient: (any DailyKLineFetching)?
     private let clock: () -> Date
     private var undecodableTracking: [String: TrackingJSONValue] = [:]
     private var backedUpCorruptTracking = false
@@ -104,10 +116,12 @@ final class QuoteStore: ObservableObject {
 
     init(defaults: UserDefaults, preview: String?, client: QuoteClient = QuoteClient(),
          marketClient: (any MarketOverviewFetching)? = nil,
-         intradayClient: (any IntradayFetching)? = nil, clock: @escaping () -> Date = Date.init) {
+         intradayClient: (any IntradayFetching)? = nil,
+         dailyKLineClient: (any DailyKLineFetching)? = nil, clock: @escaping () -> Date = Date.init) {
         self.client = client
         self.marketClient = marketClient
         self.intradayClient = intradayClient
+        self.dailyKLineClient = dailyKLineClient
         self.clock = clock
         self.marketNow = clock()
         self.defaults = defaults
@@ -275,6 +289,29 @@ final class QuoteStore: ObservableObject {
         }
     }
 
+    func savePerSharePosition(for symbol: StockSymbol, perShareCost: String, quantity: String,
+                              upper: String, lower: String, now: Date = Date()) throws {
+        let costText = perShareCost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let quantityText = quantity.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard costText.isEmpty == quantityText.isEmpty else {
+            throw TrackingError.invalidInput("每股成本和持仓股数需同时填写，或同时留空。")
+        }
+        if let existing = tracking[symbol.id], existing.hasPosition,
+           costText == existing.perShareCostInputText,
+           quantityText == existing.quantity.map(String.init) {
+            // Keep exact historical total cost when the displayed average was not edited.
+            try saveTracking(for: symbol, cost: existing.costPrice.map { String($0) } ?? "",
+                             quantity: quantityText, upper: upper, lower: lower,
+                             totalCost: existing.totalCostYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "",
+                             purchaseAmount: existing.purchaseAmountYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "",
+                             purchaseCommissionRate: existing.purchaseCommissionRate,
+                             perShareCost: existing.perShareCostYuan.map { NSDecimalNumber(decimal: $0).stringValue } ?? "", now: now)
+        } else {
+            try saveTracking(for: symbol, cost: "", quantity: quantityText, upper: upper, lower: lower,
+                             perShareCost: costText, now: now)
+        }
+    }
+
     func rearmAlerts(for symbol: StockSymbol, now: Date = Date()) {
         guard symbols.contains(symbol), var value = tracking[symbol.id], value.hasAlerts else { return }
         value.upperTriggered = false
@@ -416,6 +453,10 @@ final class QuoteStore: ObservableObject {
         intradayRequest = nil
         isIntradayRefreshing = false
         lastIntradayAttempt = nil
+        dailyKLineRequest?.cancel()
+        dailyKLineRequest = nil
+        isDailyKLineRefreshing = false
+        lastDailyKLineAttempt = nil
         updateActivity()
     }
 
@@ -449,6 +490,7 @@ final class QuoteStore: ObservableObject {
         updateActivity()
         refreshMarket(force: forceMarket)
         refreshIntraday(force: forceMarket)
+        refreshDailyKLine(force: forceMarket)
         guard !suspended, !allSymbols.isEmpty, !isRefreshing else { return }
         let requested = allSymbols
         isRefreshing = true
@@ -491,16 +533,32 @@ final class QuoteStore: ObservableObject {
         expandedChartSymbolID = nil
         intradaySnapshot = nil
         intradayError = nil
+        dailyKLineRequest?.cancel()
+        dailyKLineRequest = nil
+        isDailyKLineRefreshing = false
+        lastDailyKLineAttempt = nil
+        dailyKLineSnapshot = nil
+        dailyKLineError = nil
     }
 
     func toggleIntraday(for symbol: StockSymbol) {
+        toggleChart(for: symbol, kind: .intraday)
+    }
+
+    func toggleDailyKLine(for symbol: StockSymbol) {
+        toggleChart(for: symbol, kind: .dailyKLine)
+    }
+
+    private func toggleChart(for symbol: StockSymbol, kind: ChartKind) {
         guard visibleSymbols.contains(symbol) else { return }
-        let opening = expandedChartSymbolID != symbol.id
+        let opening = expandedChartSymbolID != symbol.id || chartKind != kind
         closeIntraday()
         if opening {
             expandedSymbolID = nil
+            chartKind = kind
             expandedChartSymbolID = symbol.id
-            refreshIntraday(force: true)
+            if kind == .dailyKLine { refreshDailyKLine(force: true) }
+            else { refreshIntraday(force: true) }
         }
     }
 
@@ -509,7 +567,7 @@ final class QuoteStore: ObservableObject {
     }
 
     private func refreshIntraday(force: Bool) {
-        guard !suspended, let id = expandedChartSymbolID,
+        guard !suspended, chartKind == .intraday, let id = expandedChartSymbolID,
               let symbol = visibleSymbols.first(where: { $0.id == id }) else { return }
         let now = clock()
         if usesOpeningAuctionChart(for: symbol, at: now) {
@@ -537,7 +595,8 @@ final class QuoteStore: ObservableObject {
             }
             do {
                 let incoming = try await intradayClient.fetch(symbol)
-                guard !Task.isCancelled, self.expandedChartSymbolID == symbol.id else { return }
+                guard !Task.isCancelled, self.chartKind == .intraday,
+                      self.expandedChartSymbolID == symbol.id else { return }
                 let receipt = self.clock()
                 guard !self.usesOpeningAuctionChart(for: symbol, at: receipt) else { return }
                 guard incoming.symbol == symbol, incoming.timestamp <= receipt.addingTimeInterval(5),
@@ -550,6 +609,38 @@ final class QuoteStore: ObservableObject {
             } catch {
                 guard !Task.isCancelled, !self.usesOpeningAuctionChart(for: symbol, at: self.clock()) else { return }
                 self.intradayError = error.localizedDescription
+            }
+        }
+    }
+
+    private func refreshDailyKLine(force: Bool) {
+        guard !suspended, chartKind == .dailyKLine, let id = expandedChartSymbolID,
+              let symbol = visibleSymbols.first(where: { $0.id == id }),
+              let dailyKLineClient, !isDailyKLineRefreshing else { return }
+        let now = clock()
+        if !force, let lastDailyKLineAttempt, now >= lastDailyKLineAttempt,
+           now.timeIntervalSince(lastDailyKLineAttempt) < max(30, MarketClock.session(at: now).pollInterval) { return }
+        lastDailyKLineAttempt = now
+        isDailyKLineRefreshing = true
+        dailyKLineRequest = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if !Task.isCancelled { self.isDailyKLineRefreshing = false; self.dailyKLineRequest = nil }
+            }
+            do {
+                let incoming = try await dailyKLineClient.fetch(symbol)
+                guard !Task.isCancelled, self.chartKind == .dailyKLine,
+                      self.expandedChartSymbolID == symbol.id else { return }
+                guard incoming.symbol == symbol, incoming.timestamp <= self.clock().addingTimeInterval(5),
+                      self.dailyKLineSnapshot.map({ incoming.timestamp >= $0.timestamp }) ?? true else {
+                    self.dailyKLineError = "日K源时间异常，保留上次图并自动重试"
+                    return
+                }
+                self.dailyKLineSnapshot = incoming
+                self.dailyKLineError = nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.dailyKLineError = error.localizedDescription
             }
         }
     }
@@ -602,7 +693,8 @@ final class QuoteStore: ObservableObject {
         unavailable.formUnion(requestedIDs.subtracting(accepted.keys))
         lastReceipt = receipt
         errorMessage = nil
-        if let id = expandedChartSymbolID, let symbol = visibleSymbols.first(where: { $0.id == id }),
+        if chartKind == .intraday, let id = expandedChartSymbolID,
+           let symbol = visibleSymbols.first(where: { $0.id == id }),
            usesOpeningAuctionChart(for: symbol, at: receipt) {
             intradaySnapshot = openingAuctionHistory.snapshot(for: id, at: receipt)
             intradayError = nil
@@ -652,17 +744,22 @@ struct QuoteRow: View {
     let isExpanded: Bool
     let alertMessage: String?
     let notificationNotice: String?
-    let commissionRate: String
     let configure: () -> Void
-    let save: (String, String, String, String, Bool, String, String) throws -> Void
+    let save: (String, String, String, String) throws -> Void
     let rearm: () -> Void
     let remove: () -> Void
     var isChartExpanded = false
+    var chartKind: ChartKind = .intraday
     var intradaySnapshot: IntradaySnapshot?
     var intradayError: String?
     var isIntradayRefreshing = false
+    var dailyKLineSnapshot: DailyKLineSnapshot?
+    var dailyKLineError: String?
+    var isDailyKLineRefreshing = false
     var chartNow = Date()
     var showIntraday: () -> Void = {}
+    var showDailyKLine: () -> Void = {}
+    var expandChart: () -> Void = {}
 
     private var profit: PositionProfit? { valuationPrice.flatMap { configuration.profit(at: $0) } }
     private var priceChange: Double? {
@@ -696,13 +793,24 @@ struct QuoteRow: View {
                         HStack(spacing: 3) {
                             Text(quote?.name ?? symbol.code)
                                 .font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 7, weight: .semibold)).foregroundStyle(.secondary)
+                            Text("持仓")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(isExpanded ? Color.accentColor : Color.primary.opacity(0.8))
+                                .frame(width: 30, height: 18)
+                                .background(isExpanded ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06))
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .overlay(RoundedRectangle(cornerRadius: 4)
+                                    .stroke(isExpanded ? Color.accentColor.opacity(0.65) : Color.primary.opacity(0.2), lineWidth: 0.7))
                         }
                     }
                     .buttonStyle(.plain)
-                    .help("点击名称展开或收起持仓与价格提醒")
+                    .help("点击持仓按钮或股票名称，展开或收起数量、价格与提醒设置")
                     .accessibilityLabel("\(isExpanded ? "收起" : "设置")\(symbol.code)持仓和提醒")
+                    .accessibilityValue(isExpanded ? "已展开" : "未展开")
+                    ChartToggleButton(kind: .intraday, active: isChartExpanded && chartKind == .intraday,
+                                      name: symbol.code, action: showIntraday)
+                    ChartToggleButton(kind: .dailyKLine, active: isChartExpanded && chartKind == .dailyKLine,
+                                      name: symbol.code, action: showDailyKLine)
                     if failed || unavailable {
                         Text(quote == nil ? "无行情" : "上次数据")
                             .font(.system(size: 9)).foregroundStyle(.orange)
@@ -730,17 +838,12 @@ struct QuoteRow: View {
                     HStack(spacing: 8) {
                         Text(symbol.id.uppercased())
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .fixedSize()
                         Button(action: remove) { Image(systemName: "xmark.circle") }
                             .font(.system(size: 11))
                             .buttonStyle(.plain)
                             .help("删除这只股票")
                             .accessibilityLabel("删除\(symbol.code)")
-                        Button(action: showIntraday) { Image(systemName: "chart.xyaxis.line") }
-                            .font(.system(size: 11))
-                            .buttonStyle(.plain)
-                            .foregroundStyle(isChartExpanded ? Color.accentColor : Color.secondary)
-                            .help(isChartExpanded ? "收起分时图" : "查看价格走势和分钟成交量")
-                            .accessibilityLabel("\(isChartExpanded ? "收起" : "查看")\(symbol.code)分时图")
                         Spacer(minLength: 0)
                     }
                     .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
@@ -755,10 +858,10 @@ struct QuoteRow: View {
                     metric("成交额", value: quote.map { DisplayFormat.magnitude($0.amountYuan, unit: "元") } ?? "—")
                 }
                 HStack(spacing: 10) {
-                    metric("最高", value: quote.flatMap(\.dayHigh).map { String(format: "%.2f", $0) } ?? "—")
-                        .help("今日最高价，随腾讯行情源报价刷新；休市时为最新交易日快照")
                     metric("最低", value: quote.flatMap(\.dayLow).map { String(format: "%.2f", $0) } ?? "—")
                         .help("今日最低价，随腾讯行情源报价刷新；休市时为最新交易日快照")
+                    metric("最高", value: quote.flatMap(\.dayHigh).map { String(format: "%.2f", $0) } ?? "—")
+                        .help("今日最高价，随腾讯行情源报价刷新；休市时为最新交易日快照")
                     metric("总市值", value: quote.flatMap(\.marketCapYuan).map { DisplayFormat.marketCap($0) } ?? "—")
                         .help("腾讯行情源公司总市值，按全部股份口径，单位为人民币元")
                 }
@@ -774,7 +877,7 @@ struct QuoteRow: View {
                         } ?? (configuration.totalCostYuan != nil
                               ? "\(configuration.quantity ?? 0)股；含费总成本\(configuration.totalCostText)元；单股成本自动计算"
                               : "\(configuration.quantity ?? 0)股；原手动成本，总成本\(configuration.totalCostText)元为估算"))
-                    metric("浮盈亏", value: profit?.amountText ?? "—")
+                    metric("浮盈亏（约）", value: profit?.amountText ?? "—", titleWidth: 60)
                         .foregroundStyle(profitColor)
                     metric("盈亏率", value: profit.flatMap(\.percent).map { String(format: "%+.2f%%", $0) } ?? "—")
                         .foregroundStyle(profitColor)
@@ -786,7 +889,7 @@ struct QuoteRow: View {
                       ? "费用按单笔买入委托及设置的佣金率预估；费用落账后可切换为实际含费总成本"
                       : configuration.totalCostYuan != nil
                       ? "浮盈亏＝最新可用报价×持仓股数−含费总成本；不再另扣手续费"
-                      : "原配置仍按单股成本×股数估算；可点击名称填写含费总成本，避免单股成本舍入偏差")
+                      : "原配置仍按单股成本×股数估算；可点击持仓填写券商当前每股成本与股数")
             }
             if configuration.hasAlerts {
                 HStack(spacing: 6) {
@@ -807,21 +910,25 @@ struct QuoteRow: View {
                 VStack(spacing: 5) {
                     Divider().opacity(0.6)
                     TrackingEditor(symbol: symbol, configuration: invalidConfiguration ?? configuration,
-                                   commissionRate: commissionRate,
                                    notificationNotice: invalidConfiguration != nil
                                        ? "保存的配置不合法，提醒已暂停；请修正后保存。" : notificationNotice,
                                    save: save, rearm: rearm)
-                        .frame(height: 214, alignment: .top)
+                        .frame(height: trackingEditorHeight - 6, alignment: .top)
                 }
             }
             if isChartExpanded {
                 VStack(spacing: 5) {
                     Divider().opacity(0.6)
-                    IntradayChartView(snapshot: intradaySnapshot, error: intradayError,
-                                      isRefreshing: isIntradayRefreshing, now: chartNow,
-                                      isOpeningAuction: !DashboardIndex.symbols.contains(symbol)
-                                        && OpeningAuctionHistory.isActive(at: chartNow))
-                        .frame(height: IntradayChartView.height)
+                    if chartKind == .dailyKLine {
+                        DailyKLineChartView(snapshot: dailyKLineSnapshot, error: dailyKLineError,
+                                           isRefreshing: isDailyKLineRefreshing, onExpand: expandChart)
+                    } else {
+                        IntradayChartView(snapshot: intradaySnapshot, error: intradayError,
+                                          isRefreshing: isIntradayRefreshing, now: chartNow,
+                                          isOpeningAuction: !DashboardIndex.symbols.contains(symbol)
+                                            && OpeningAuctionHistory.isActive(at: chartNow), onExpand: expandChart)
+                            .frame(height: IntradayChartView.height)
+                    }
                 }
             }
         }
@@ -832,9 +939,9 @@ struct QuoteRow: View {
                + (isChartExpanded ? intradaySectionHeight : 0))
     }
 
-    private func metric(_ title: String, value: String) -> some View {
+    private func metric(_ title: String, value: String, titleWidth: CGFloat = 30) -> some View {
         HStack(spacing: 2) {
-            Text(title).frame(width: 30, alignment: .leading)
+            Text(title).frame(width: titleWidth, alignment: .leading)
             Text(value)
                 .monospacedDigit()
                 .minimumScaleFactor(0.85)
@@ -853,6 +960,8 @@ struct WidgetView: View {
     let hide: () -> Void
     let configure: (StockSymbol) -> Void
     var intraday: (StockSymbol) -> Void = { _ in }
+    var dailyKLine: (StockSymbol) -> Void = { _ in }
+    var expandChart: () -> Void = {}
     @State private var newCode = ""
     @State private var additionError: String?
     @State private var searchClient = StockSearchClient()
@@ -1044,10 +1153,15 @@ struct WidgetView: View {
                 IndexDashboardView(quotes: store.quotes, unavailable: store.unavailable,
                                    error: store.errorMessage, now: store.marketNow,
                                    expandedChartSymbolID: store.expandedChartSymbolID,
+                                   chartKind: store.chartKind,
                                    intradaySnapshot: store.intradaySnapshot,
                                    intradayError: store.intradayError,
                                    isIntradayRefreshing: store.isIntradayRefreshing,
-                                   showIntraday: intraday)
+                                   dailyKLineSnapshot: store.dailyKLineSnapshot,
+                                   dailyKLineError: store.dailyKLineError,
+                                   isDailyKLineRefreshing: store.isDailyKLineRefreshing,
+                                   showIntraday: intraday, showDailyKLine: dailyKLine,
+                                   closeChart: { store.closeIntraday() }, expandChart: expandChart)
             } else if store.visibleSymbols.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "plus.square.dashed")
@@ -1078,21 +1192,25 @@ struct WidgetView: View {
                                      isExpanded: store.expandedSymbolID == symbol.id,
                                      alertMessage: store.priceAlerts[symbol.id],
                                      notificationNotice: store.notificationNotice,
-                                     commissionRate: store.buyCommissionRate,
                                      configure: { configure(symbol) },
-                                     save: { amount, quantity, upper, lower, estimateFees, commissionRate, perShareCost in
-                                         try store.savePosition(for: symbol, amount: amount, quantity: quantity, upper: upper, lower: lower,
-                                                                estimateFees: estimateFees, commissionRate: commissionRate, perShareCost: perShareCost)
+                                     save: { perShareCost, quantity, upper, lower in
+                                         try store.savePerSharePosition(for: symbol, perShareCost: perShareCost,
+                                                                        quantity: quantity, upper: upper, lower: lower)
                                          store.expandedSymbolID = nil
                                      },
                                      rearm: { store.rearmAlerts(for: symbol) },
                                      remove: { store.removeSymbol(symbol) },
                                      isChartExpanded: store.expandedChartSymbolID == symbol.id,
+                                     chartKind: store.chartKind,
                                      intradaySnapshot: store.expandedChartSymbolID == symbol.id ? store.intradaySnapshot : nil,
                                      intradayError: store.expandedChartSymbolID == symbol.id ? store.intradayError : nil,
                                      isIntradayRefreshing: store.isIntradayRefreshing,
+                                     dailyKLineSnapshot: store.expandedChartSymbolID == symbol.id ? store.dailyKLineSnapshot : nil,
+                                     dailyKLineError: store.expandedChartSymbolID == symbol.id ? store.dailyKLineError : nil,
+                                     isDailyKLineRefreshing: store.isDailyKLineRefreshing,
                                      chartNow: store.marketNow,
-                                     showIntraday: { intraday(symbol) })
+                                     showIntraday: { intraday(symbol) },
+                                     showDailyKLine: { dailyKLine(symbol) }, expandChart: expandChart)
                                 .id(symbol.id)
                             if symbol != store.visibleSymbols.last { Divider().padding(.horizontal, 16).opacity(0.6) }
                         }
@@ -1272,6 +1390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     private var previewDomain: String?
     private var notificationCenter: UNUserNotificationCenter?
     private var edgeDock: EdgeDockController?
+    private var expandedChartWindow: ExpandedChartWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let arguments = CommandLine.arguments
@@ -1285,7 +1404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             defaults = UserDefaults(suiteName: domain)!
         } else { defaults = .standard }
         store = QuoteStore(defaults: defaults, preview: preview, marketClient: MarketOverviewClient(),
-                           intradayClient: IntradayClient())
+                           intradayClient: IntradayClient(), dailyKLineClient: DailyKLineClient())
         if !store.isPreview {
             notificationCenter = UNUserNotificationCenter.current()
             notificationCenter?.delegate = self
@@ -1390,7 +1509,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         panel.isReleasedWhenClosed = false
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
-        panel.isMovableByWindowBackground = true
+        // Only WindowDraggingArea should start a drag. A small pointer movement
+        // on a SwiftUI tab must not become a window move and trigger docking.
+        panel.isMovableByWindowBackground = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.ignoresMouseEvents = false
@@ -1418,7 +1539,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
                                                                autoHide: { [weak self] in self?.toggleAutoHide() },
                                                                hide: { [weak self] in self?.hidePanel() },
                                                                configure: { [weak self] symbol in self?.toggleTracking(symbol) },
-                                                               intraday: { [weak self] symbol in self?.toggleIntraday(symbol) }))
+                                                               intraday: { [weak self] symbol in self?.toggleIntraday(symbol) },
+                                                               dailyKLine: { [weak self] symbol in self?.toggleIntraday(symbol, kind: .dailyKLine) },
+                                                               expandChart: { [weak self] in self?.showExpandedChart() }))
         host.translatesAutoresizingMaskIntoConstraints = false
         surface.addSubview(host)
         NSLayoutConstraint.activate([
@@ -1543,6 +1666,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         store.isAdjustingTransparency.toggle()
     }
 
+    private func showExpandedChart() {
+        guard store.expandedChartSymbolID != nil else { return }
+        if expandedChartWindow == nil { expandedChartWindow = ExpandedChartWindow(store: store) }
+        expandedChartWindow?.show(on: panel.screen)
+    }
+
     private func toggleTracking(_ symbol: StockSymbol) {
         edgeDock?.show()
         NSApp.activate(ignoringOtherApps: true)
@@ -1553,13 +1682,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         store.expandedSymbolID = store.expandedSymbolID == symbol.id ? nil : symbol.id
     }
 
-    private func toggleIntraday(_ symbol: StockSymbol) {
+    private func toggleIntraday(_ symbol: StockSymbol, kind: ChartKind = .intraday) {
         edgeDock?.show()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         store.isAddingStock = false
         store.isAdjustingTransparency = false
-        store.toggleIntraday(for: symbol)
+        if kind == .dailyKLine { store.toggleDailyKLine(for: symbol) }
+        else { store.toggleIntraday(for: symbol) }
     }
 
     @objc private func prepareNotifications() {

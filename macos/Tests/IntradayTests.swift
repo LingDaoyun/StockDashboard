@@ -74,6 +74,25 @@ enum IntradayTests {
         try expect(mixedQT.points.count == 2, "无关qt字段的混合类型不应阻止目标股票解析")
         try expect(value.symbol == symbol && value.date == "20261026", "分时数据匹配代码和交易日")
         try expect(value.previousClose == 3.36 && value.points.map(\.price) == [3.35, 3.35], "读取昨收和价格")
+        let opened = try IntradayParser.parse(fixture(rows: ["0931 11.00 100", "0932 9.00 200", "0933 10.00 300"],
+                                                     time: "20261026093300", previousClose: "8.00",
+                                                     qtEdits: [5: "10.00"]), symbol: symbol)
+        try expect(opened.dayOpen == 10, "开盘价取同包报价，不用昨收或首个分钟点代替")
+        for (point, expected) in zip(opened.points, [10.0, -10.0, 0.0]) {
+            let percent = opened.changeFromOpenPercent(at: point)
+            try expect(percent != nil && abs(percent! - expected) < 0.000001,
+                       "选点涨跌幅以当日开盘价为分母，覆盖上涨、下跌和持平")
+        }
+        for invalid in ["", "0", "-1", "NaN", "inf", "bad"] {
+            let missingOpen = try IntradayParser.parse(fixture(qtEdits: [5: invalid]), symbol: symbol)
+            try expect(missingOpen.dayOpen == nil && missingOpen.points.count == 2 &&
+                       missingOpen.changeFromOpenPercent(at: missingOpen.points[0]) == nil,
+                       "无有效开盘价时保留分时图但不补造涨跌幅：\(invalid)")
+        }
+        var auction = opened
+        auction.isOpeningAuction = true
+        try expect(auction.changeFromOpenPercent(at: auction.points[0]) == nil,
+                   "竞价参考价不显示相对正式开盘价的涨跌幅")
         let range = try IntradayParser.parse(fixture(qtEdits: [33: "3.42", 34: "3.28"]), symbol: symbol)
         try expect(range.dayHigh == 3.42 && range.dayLow == 3.28,
                    "当天最高最低读取报价字段，不用分钟采样点或昨收代替")

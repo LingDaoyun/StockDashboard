@@ -1,5 +1,30 @@
 import SwiftUI
 
+struct ChartToggleButton: View {
+    let kind: ChartKind
+    let active: Bool
+    let name: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(kind.title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(active ? Color.accentColor : Color.primary.opacity(0.8))
+                .frame(width: 30, height: 18)
+                .background(active ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                    .stroke(active ? Color.accentColor.opacity(0.65) : Color.primary.opacity(0.2), lineWidth: 0.7))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("点击\(active ? "收起" : "展开")\(kind.title)图")
+        .accessibilityLabel("\(active ? "收起" : "查看")\(name)\(kind.title)图")
+        .accessibilityValue(active ? "已展开" : "未展开")
+    }
+}
+
 struct DashboardIndex: Identifiable, Sendable {
     let symbol: StockSymbol
     let title: String
@@ -29,10 +54,17 @@ struct IndexDashboardView: View {
     let error: String?
     let now: Date
     let expandedChartSymbolID: String?
+    let chartKind: ChartKind
     let intradaySnapshot: IntradaySnapshot?
     let intradayError: String?
     let isIntradayRefreshing: Bool
+    let dailyKLineSnapshot: DailyKLineSnapshot?
+    let dailyKLineError: String?
+    let isDailyKLineRefreshing: Bool
     let showIntraday: (StockSymbol) -> Void
+    let showDailyKLine: (StockSymbol) -> Void
+    let closeChart: () -> Void
+    var expandChart: () -> Void = {}
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -45,7 +77,9 @@ struct IndexDashboardView: View {
                                 IndexCard(index: index, quote: quotes[index.id],
                                           unavailable: unavailable.contains(index.id), error: error, now: now,
                                           isChartExpanded: expandedChartSymbolID == index.id,
-                                          showIntraday: { showIntraday(index.symbol) })
+                                          chartKind: chartKind,
+                                          showIntraday: { showIntraday(index.symbol) },
+                                          showDailyKLine: { showDailyKLine(index.symbol) })
                             }
                         }
                         if let index = indices.first(where: { $0.id == expandedChartSymbolID }) {
@@ -74,20 +108,26 @@ struct IndexDashboardView: View {
                 Text(index.title).fontWeight(.semibold)
                 Text(index.symbol.code).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
-                Button { showIntraday(index.symbol) } label: {
+                Button(action: closeChart) {
                     Image(systemName: "xmark")
                         .foregroundStyle(.secondary)
                         .frame(width: 24, height: 20)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("收起" + index.title + "分时图")
-                .accessibilityLabel("收起" + index.title + "分时图")
+                .help("收起\(index.title)\(chartKind.title)图")
+                .accessibilityLabel("收起\(index.title)\(chartKind.title)图")
             }
             .font(.system(size: 11))
-            IntradayChartView(snapshot: intradaySnapshot, error: intradayError,
-                              isRefreshing: isIntradayRefreshing, now: now)
-                .id(index.id)
+            if chartKind == .dailyKLine {
+                DailyKLineChartView(snapshot: dailyKLineSnapshot, error: dailyKLineError,
+                                   isRefreshing: isDailyKLineRefreshing, onExpand: expandChart)
+                    .id(index.id)
+            } else {
+                IntradayChartView(snapshot: intradaySnapshot, error: intradayError,
+                                  isRefreshing: isIntradayRefreshing, now: now, onExpand: expandChart)
+                    .id(index.id)
+            }
         }
         .padding(10)
         .background(Color.primary.opacity(0.035))
@@ -102,7 +142,9 @@ private struct IndexCard: View {
     let error: String?
     let now: Date
     let isChartExpanded: Bool
+    let chartKind: ChartKind
     let showIntraday: () -> Void
+    let showDailyKLine: () -> Void
 
     private static let rising = Color(red: 0.85, green: 0.19, blue: 0.24)
     private static let falling = Color(red: 0.06, green: 0.59, blue: 0.38)
@@ -124,9 +166,7 @@ private struct IndexCard: View {
                     if warning != nil {
                         Circle().fill(.orange).frame(width: 4, height: 4)
                     }
-                    Image(systemName: "chart.xyaxis.line")
-                        .font(.system(size: 10))
-                        .foregroundStyle(isChartExpanded ? Color.accentColor : Color.secondary)
+                    Color.clear.frame(width: 64, height: 12)
                 }
                 HStack(spacing: 4) {
                     Text(index.detail)
@@ -168,8 +208,18 @@ private struct IndexCard: View {
         }
         .buttonStyle(.plain)
         .help(details)
-        .accessibilityLabel((isChartExpanded ? "收起" : "查看") + index.title + "分时图")
+        .accessibilityLabel((isChartExpanded && chartKind == .intraday ? "收起" : "查看") + index.title + "分时图")
         .accessibilityValue(accessibilityText)
+        .overlay(alignment: .topTrailing) {
+            HStack(spacing: 4) {
+                ChartToggleButton(kind: .intraday, active: isChartExpanded && chartKind == .intraday,
+                                  name: index.title, action: showIntraday)
+                ChartToggleButton(kind: .dailyKLine, active: isChartExpanded && chartKind == .dailyKLine,
+                                  name: index.title, action: showDailyKLine)
+            }
+            .padding(.trailing, 10)
+            .padding(.top, 8)
+        }
     }
 
     private var changeColor: Color {

@@ -29,10 +29,41 @@ enum TrackingTests {
     }
 
     static func main() throws {
+        let inputCases: [(StockTracking, String, String)] = [
+            (StockTracking(costPrice: 10.12, quantity: 500, perShareCostYuan: Decimal(string: "10.12345678")),
+             "10.12345678", "每股Decimal保留完整八位精度，优先于旧Double展示值"),
+            (StockTracking(costPrice: 99, quantity: 3, totalCostYuan: 1),
+             "0.33333333", "总成本除不尽时用Decimal回显八位，不使用旧展示值"),
+            (StockTracking(quantity: 3, totalCostYuan: 2), "0.66666667", "总成本均价按第九位四舍五入"),
+            (StockTracking(quantity: 300, totalCostYuan: 1005, purchaseAmountYuan: 1000,
+                           purchaseCommissionRate: Decimal(string: "2.5")),
+             "3.35", "旧买入模式按已保存含费总成本除股数，不用成交金额或重算手续费"),
+            (StockTracking(quantity: 100, perShareCostYuan: 0), "0", "零每股成本回显零"),
+            (StockTracking(quantity: 100, perShareCostYuan: Decimal(string: "-1.23456789")),
+             "-1.23456789", "负每股成本保留完整精度"),
+            (StockTracking(quantity: 3, totalCostYuan: 0), "0", "零总成本均价回显零"),
+            (StockTracking(quantity: 6, totalCostYuan: -1), "-0.16666667", "负总成本均价四舍五入并保留负号"),
+            (StockTracking(costPrice: 10.123456789, quantity: 100), "10.12345679", "旧成本价最多回显八位小数"),
+            (StockTracking(costPrice: 1e-7, quantity: 100), "0.0000001", "旧成本价回显普通十进制而非科学记数"),
+            (StockTracking(), "", "没有成本时输入框为空"),
+            (StockTracking(totalCostYuan: 100), "", "总成本缺股数时不伪造均价"),
+            (StockTracking(quantity: 0, totalCostYuan: 100), "", "总成本不除以无效股数"),
+            (StockTracking(costPrice: .infinity), "", "非有限旧成本不回显为有效价格")
+        ]
+        for (value, expected, message) in inputCases {
+            check(value.perShareCostInputText == expected, message)
+        }
+
         let empty = try StockTracking.parse(cost: " \n ", quantity: "", upper: "", lower: " ")
         check(empty == StockTracking(), "全空输入相当于未设置")
         check(!empty.hasPosition && !empty.hasAlerts && !empty.hasTriggeredAlerts, "新配置没有持仓或提醒")
         check(empty.profit(at: 10) == nil, "没有持仓时不计算盈亏")
+
+        let exactTotal = try StockTracking.parse(cost: "", quantity: "4500", upper: "5", lower: "", totalCost: "18763.07")
+        check(exactTotal.totalCostText == "18763.07" && exactTotal.profit(at: 4.22)?.amountText == "+226.93", "直接输入总成本按分计算持仓盈亏")
+        check(exactTotal.profit(at: 4.23)?.amountText == "+271.93", "现价上涨一分时4500股持仓盈亏增加45元")
+        let exactTotalRestored = try JSONDecoder().decode(StockTracking.self, from: JSONEncoder().encode(exactTotal)).validated()
+        check(exactTotalRestored == exactTotal && exactTotalRestored.profit(at: 4.23)?.amountText == "+271.93", "总成本JSON恢复保留分精度，不依赖展示均价")
 
         let perShareData = Data(#"{"costPrice":10.123,"perShareCostYuan":10.12345678,"quantity":500,"upperTriggered":false,"lowerTriggered":false}"#.utf8)
         let perShareDecoded = try JSONDecoder().decode(StockTracking.self, from: perShareData).validated()
@@ -189,8 +220,20 @@ enum TrackingTests {
         check(totalZero.profit(at: 10)?.amountText == "+0.00" && totalZero.profit(at: 10)?.percent == 0, "总成本等于市值时金额和盈亏率归零")
         let partialYuan = try StockTracking.parse(cost: "", quantity: "1", upper: "", lower: "", totalCost: ".50")
         check(partialYuan.totalCostText == "0.50", "总成本可输入不足一元的十进制金额")
-        for text in ["0", "-1", "nan", "inf", "-inf", "5e3", "1e999", "1.00abc", "1,000.00", "１.２３", "1.001", "1.000", ".", "1.", "+1"] {
-            rejects("总成本应是正数且最多两位小数，科学记数和局部有效输入不能通过：\(text)") {
+        for text in ["0", "-0.00", "-.50", "-1.23"] {
+            var nonpositive = try StockTracking.parse(cost: "-0.01", quantity: "3", upper: "12", lower: "", totalCost: text)
+            let cost = Decimal(string: text)!
+            check(nonpositive.hasPosition && nonpositive.totalCostYuan == cost && nonpositive.costPrice == NSDecimalNumber(decimal: cost / 3).doubleValue,
+                  "零或负总成本优先于旧展示均价并重算展示均价：\(text)")
+            check(nonpositive.profit(at: 10)?.amount == Decimal(30) - cost && nonpositive.profit(at: 10)?.percent == nil,
+                  "非正总成本正常计算盈亏金额且不显示盈亏率：\(text)")
+            nonpositive.upperTriggered = true
+            nonpositive.armedAt = Date(timeIntervalSince1970: 1234)
+            let restored = try JSONDecoder().decode(StockTracking.self, from: JSONEncoder().encode(nonpositive)).validated()
+            check(restored == nonpositive && restored.totalCostText == yuanText(cost, showSign: false), "非正总成本JSON恢复保留金额和提醒状态：\(text)")
+        }
+        for text in ["nan", "inf", "-inf", "5e3", "1e999", "1.00abc", "1,000.00", "１.２３", "1.001", "1.000", ".", "1.", "+1"] {
+            rejects("总成本应是最多两位小数的十进制数，科学记数和局部有效输入不能通过：\(text)") {
                 _ = try StockTracking.parse(cost: "", quantity: "500", upper: "", lower: "", totalCost: text)
             }
         }
@@ -201,7 +244,7 @@ enum TrackingTests {
         }
         rejects("没有股数时不能填写总成本") { _ = try StockTracking.parse(cost: "", quantity: "", upper: "", lower: "", totalCost: "100") }
         rejects("总成本与旧成本均为空时不能只填股数") { _ = try StockTracking.parse(cost: "", quantity: "500", upper: "", lower: "", totalCost: "") }
-        for value in [Decimal.zero, Decimal(-1), Decimal.nan, Decimal(string: "0.001")!] {
+        for value in [Decimal.nan, Decimal(string: "0.001")!] {
             let invalidTotal = StockTracking(quantity: 500, totalCostYuan: value)
             rejects("恢复配置不能接受非法总成本") { _ = try invalidTotal.validated() }
             check(invalidTotal.profit(at: 12) == nil, "非法总成本不能生成盈亏")

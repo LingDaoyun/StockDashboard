@@ -24,6 +24,13 @@ struct IntradaySnapshot: Sendable {
     var isOpeningAuction: Bool = false
     var dayHigh: Double? = nil
     var dayLow: Double? = nil
+    var dayOpen: Double? = nil
+
+    func changeFromOpenPercent(at point: IntradayPoint) -> Double? {
+        guard !isOpeningAuction, let dayOpen, dayOpen.isFinite, dayOpen > 0 else { return nil }
+        let percent = (point.price - dayOpen) / dayOpen * 100
+        return percent.isFinite ? percent : nil
+    }
 }
 
 // Keep only source-stamped quotes actually received while this process is running.
@@ -154,7 +161,8 @@ enum IntradayParser {
         return IntradaySnapshot(symbol: symbol, date: day, timestamp: timestamp,
                                 previousClose: previousClose, points: points,
                                 dayHigh: qt.count > 33 ? positiveNumber(qt[33]) : nil,
-                                dayLow: qt.count > 34 ? positiveNumber(qt[34]) : nil)
+                                dayLow: qt.count > 34 ? positiveNumber(qt[34]) : nil,
+                                dayOpen: positiveNumber(qt[5]))
     }
 
     private struct Response: Decodable {
