@@ -59,6 +59,12 @@ struct DailyKLineChartView: View {
                 }
                 Spacer(minLength: 3)
                 if let candle = headerCandle {
+                    if let limit = candle.limitStatus {
+                        Text(limit.title)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(limit == .up ? Self.rising : Self.falling)
+                            .fixedSize()
+                    }
                     Text(candle.date).foregroundStyle(.secondary)
                     Text("开 " + Self.priceText(candle.open)).foregroundStyle(.secondary)
                     Text("收 " + Self.priceText(candle.close)).foregroundStyle(Self.color(candle))
@@ -411,6 +417,18 @@ struct DailyKLineChartView: View {
                               height: max(1, abs(openY - closeY)))
             context.fill(Path(body), with: .color(color))
 
+            if let limit = candle.limitStatus {
+                // Keep caps inside their candle's slot even when displaying the full history.
+                let width = min(step * 0.9, max(bodyWidth + 3, isLargeChart ? 7 : 4))
+                let capY = y(limit == .up ? candle.high : candle.low)
+                let cap = Path { path in
+                    path.move(to: CGPoint(x: centerX - width / 2, y: capY))
+                    path.addLine(to: CGPoint(x: centerX + width / 2, y: capY))
+                }
+                context.stroke(cap, with: .color(limit == .up ? Self.rising : Self.falling),
+                               lineWidth: isLargeChart ? 3 : 2.2)
+            }
+
             if candle.volumeLots > 0 {
                 let height = max(0.7, CGFloat(candle.volumeLots / max(maximumVolume, 1)) * volume.height)
                 let bar = CGRect(x: centerX - bodyWidth / 2, y: volume.maxY - height,
@@ -527,13 +545,13 @@ struct DailyKLineChartView: View {
 
     private var accessibilitySummary: String {
         guard let candle = headerCandle else { return "尚无日K数据" }
-        return "\(candle.date)，\(snapshot?.adjustment ?? "")，开盘\(Self.priceText(candle.open))，最高\(Self.priceText(candle.high))，最低\(Self.priceText(candle.low))，收盘\(Self.priceText(candle.close))，成交量\(Self.volumeText(candle.volumeLots))。\(error ?? "")"
+        return "\(candle.date)，\(snapshot?.adjustment ?? "")，\(candle.limitStatus.map { $0.title + "，" } ?? "")开盘\(Self.priceText(candle.open))，最高\(Self.priceText(candle.high))，最低\(Self.priceText(candle.low))，收盘\(Self.priceText(candle.close))，成交量\(Self.volumeText(candle.volumeLots))。\(error ?? "")"
     }
 
     private var details: String {
         guard let candle = headerCandle else { return "尚无日K数据" }
         return [
-            "日期：\(candle.date)　\(snapshot?.adjustment ?? "")",
+            "日期：\(candle.date)　\(snapshot?.adjustment ?? "")\(candle.limitStatus.map { "　" + $0.title } ?? "")",
             "开盘：\(Self.priceText(candle.open))　收盘：\(Self.priceText(candle.close))",
             "最高：\(Self.priceText(candle.high))　最低：\(Self.priceText(candle.low))",
             "成交量：\(Self.volumeText(candle.volumeLots))"
