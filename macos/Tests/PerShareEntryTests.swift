@@ -54,5 +54,59 @@ func runPerShareEntryTests() throws -> Int {
     try store.savePerSharePosition(for: symbol, perShareCost: "", quantity: "", upper: "14", lower: "9")
     check(store.tracking[symbol.id]?.hasPosition == false && store.tracking[symbol.id]?.hasAlerts == true,
           "同时留空清除持仓，独立提醒保留")
+
+    try store.addSymbols("002580")
+    let other = store.symbols[1]
+    let now = ISO8601DateFormatter().date(from: "2026-10-12T10:00:00+08:00")!
+    try store.savePerSharePosition(for: other, perShareCost: "20", quantity: "100", upper: "26", lower: "18", now: now)
+    try store.savePosition(for: symbol, amount: "1000", quantity: "100", upper: "12", lower: "8",
+                           estimateFees: true, commissionRate: "2.5", now: now)
+    func quote(_ stock: StockSymbol, price: Double) -> Quote {
+        Quote(symbol: stock, name: "synthetic", price: price, previousClose: price,
+              change: 0, changePercent: 0, volumeLots: 100, amountYuan: 1000,
+              timestamp: now, turnoverPercent: nil, volumeRatio: nil, amplitudePercent: nil)
+    }
+    store.receive([symbol.id: quote(symbol, price: 7)], requested: [symbol], at: now)
+    store.receive([symbol.id: quote(symbol, price: 13), other.id: quote(other, price: 21)],
+                  requested: store.symbols, at: now)
+    let position = store.tracking[symbol.id]!
+    check(position.upperTriggered && position.lowerTriggered && store.priceAlerts[symbol.id] != nil,
+          "清仓测试先建立两个方向已触发的独立提醒")
+    check(store.totalPositionProfit == position.profit(at: 13)!.amount + 100,
+          "清仓前总盈亏包含两只股票")
+    let symbolsBeforeClear = store.symbols
+    let quotesBeforeClear = store.quotes
+    let alertsBeforeClear = store.priceAlerts
+    let otherBeforeClear = store.tracking[other.id]
+    let alertsOnly = StockTracking(upperPrice: 12, lowerPrice: 8, upperTriggered: true,
+                                   lowerTriggered: true, armedAt: position.armedAt)
+    store.expandedSymbolID = symbol.id
+    store.clearPosition(for: symbol)
+    check(store.tracking[symbol.id] == alertsOnly,
+          "直接清仓清除成本、股数、旧总成本和买入预估字段，保留提醒阈值、触发状态与armedAt")
+    check(store.symbols == symbolsBeforeClear && store.quotes.mapValues(\.price) == quotesBeforeClear.mapValues(\.price)
+          && store.quotes.mapValues(\.timestamp) == quotesBeforeClear.mapValues(\.timestamp)
+          && store.priceAlerts == alertsBeforeClear, "清仓不删除股票、报价或已显示提醒")
+    check(store.tracking[other.id] == otherBeforeClear && store.totalPositionProfit == 100,
+          "清仓不修改其他股票，总盈亏立即只计算剩余持仓")
+    check(store.expandedSymbolID == nil, "清仓关闭该股编辑器，避免旧草稿回填")
+    let trackingAfterClear = store.tracking
+    store.clearPosition(for: symbol)
+    check(store.tracking == trackingAfterClear && store.priceAlerts == alertsBeforeClear
+          && store.symbols == symbolsBeforeClear && store.totalPositionProfit == 100,
+          "没有持仓时重复清仓不改变提醒、股票或剩余持仓")
+    let restored = QuoteStore(defaults: defaults, preview: nil)
+    restored.suspend()
+    check(restored.tracking[symbol.id] == alertsOnly && restored.tracking[other.id] == otherBeforeClear
+          && restored.symbols == symbolsBeforeClear, "重启不恢复已清持仓，提醒状态及其他股票仍保留")
+
+    try store.savePerSharePosition(for: symbol, perShareCost: "10.12345678", quantity: "100", upper: "", lower: "")
+    store.clearPosition(for: symbol)
+    check(store.tracking[symbol.id] == nil && store.totalPositionProfit == 100,
+          "精确每股成本同样可清除，没有独立提醒时不残留持仓记录")
+    let restoredPerShare = QuoteStore(defaults: defaults, preview: nil)
+    restoredPerShare.suspend()
+    check(restoredPerShare.tracking[symbol.id] == nil && restoredPerShare.tracking[other.id] == otherBeforeClear,
+          "重启不恢复精确每股成本，其他股票配置不变")
     return checks
 }

@@ -312,6 +312,19 @@ final class QuoteStore: ObservableObject {
         }
     }
 
+    func clearPosition(for symbol: StockSymbol) {
+        guard symbols.contains(symbol), var value = tracking[symbol.id], value.hasPosition else { return }
+        value.costPrice = nil
+        value.quantity = nil
+        value.totalCostYuan = nil
+        value.perShareCostYuan = nil
+        value.purchaseAmountYuan = nil
+        value.purchaseCommissionRate = nil
+        tracking[symbol.id] = value.hasAlerts ? value : nil
+        if expandedSymbolID == symbol.id { expandedSymbolID = nil }
+        persistTracking()
+    }
+
     func rearmAlerts(for symbol: StockSymbol, now: Date = Date()) {
         guard symbols.contains(symbol), var value = tracking[symbol.id], value.hasAlerts else { return }
         value.upperTriggered = false
@@ -748,6 +761,7 @@ struct QuoteRow: View {
     let save: (String, String, String, String) throws -> Void
     let rearm: () -> Void
     let remove: () -> Void
+    var clearPosition: () -> Void = {}
     var isChartExpanded = false
     var chartKind: ChartKind = .intraday
     var intradaySnapshot: IntradaySnapshot?
@@ -878,8 +892,9 @@ struct QuoteRow: View {
             .lineLimit(1)
             .foregroundStyle(.secondary)
             if configuration.hasPosition {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     metric("成本", value: configuration.costPrice.map { String(format: "%.3f", $0) } ?? "—")
+                        .frame(width: 88)
                         .help(configuration.perShareCostYuan.map {
                             "当前\(configuration.quantity ?? 0)股；每股成本\(NSDecimalNumber(decimal: $0).stringValue)元；按做T后成本计算，不再加费"
                         } ?? (configuration.totalCostYuan != nil
@@ -887,17 +902,26 @@ struct QuoteRow: View {
                               : "\(configuration.quantity ?? 0)股；原手动成本，总成本\(configuration.totalCostText)元为估算"))
                     metric("浮盈亏（约）", value: profit?.amountText ?? "—", titleWidth: 60)
                         .foregroundStyle(profitColor)
+                        .help(configuration.perShareCostYuan != nil
+                              ? "盈亏＝（最新可用报价−当前每股成本）×当前数量；不再另扣手续费。每股成本请按券商做T后的值更新，显示舍入可能与券商有差异。"
+                              : configuration.purchaseAmountYuan != nil
+                              ? "费用按单笔买入委托及设置的佣金率预估；费用落账后可切换为实际含费总成本"
+                              : configuration.totalCostYuan != nil
+                              ? "浮盈亏＝最新可用报价×持仓股数−含费总成本；不再另扣手续费"
+                              : "原配置仍按单股成本×股数估算；可点击持仓填写券商当前每股成本与股数")
                     metric("盈亏率", value: profit.flatMap(\.percent).map { String(format: "%+.2f%%", $0) } ?? "—")
+                        .frame(width: 80)
                         .foregroundStyle(profitColor)
+                    Button(action: clearPosition) {
+                        Image(systemName: "trash")
+                            .frame(width: 18, height: 16)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("清除持仓成本和股数，保留股票及价格提醒")
+                    .accessibilityLabel("清除\(symbol.code)持仓")
                 }
                 .font(.system(size: 10)).lineLimit(1).foregroundStyle(.secondary)
-                .help(configuration.perShareCostYuan != nil
-                      ? "盈亏＝（最新可用报价−当前每股成本）×当前数量；不再另扣手续费。每股成本请按券商做T后的值更新，显示舍入可能与券商有差异。"
-                      : configuration.purchaseAmountYuan != nil
-                      ? "费用按单笔买入委托及设置的佣金率预估；费用落账后可切换为实际含费总成本"
-                      : configuration.totalCostYuan != nil
-                      ? "浮盈亏＝最新可用报价×持仓股数−含费总成本；不再另扣手续费"
-                      : "原配置仍按单股成本×股数估算；可点击持仓填写券商当前每股成本与股数")
             }
             if configuration.hasAlerts {
                 HStack(spacing: 6) {
@@ -1208,6 +1232,7 @@ struct WidgetView: View {
                                      },
                                      rearm: { store.rearmAlerts(for: symbol) },
                                      remove: { store.removeSymbol(symbol) },
+                                     clearPosition: { store.clearPosition(for: symbol) },
                                      isChartExpanded: store.expandedChartSymbolID == symbol.id,
                                      chartKind: store.chartKind,
                                      intradaySnapshot: store.expandedChartSymbolID == symbol.id ? store.intradaySnapshot : nil,
