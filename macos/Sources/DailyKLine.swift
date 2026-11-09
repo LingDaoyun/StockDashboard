@@ -203,7 +203,7 @@ final class DailyKLineClient: DailyKLineFetching, Sendable {
     }
 
     private func request(_ symbol: StockSymbol, adjustment: String) async throws -> Data {
-        let url = URL(string: "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=" + symbol.id + ",day,,,\(Self.historyLimit)," + adjustment)!
+        let url = URL(string: "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get?param=" + symbol.id + ",day,,,\(Self.historyLimit)," + adjustment)!
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 6)
         request.httpMethod = "GET"
         let data: Data

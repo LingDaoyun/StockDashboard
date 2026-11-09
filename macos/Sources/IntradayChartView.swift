@@ -208,22 +208,32 @@ struct IntradayChartView: View {
             }
             context.stroke(grid, with: .color(.secondary.opacity(0.32)), lineWidth: 0.75)
         }
+        let gridLevels = snapshot.percentGridLevels(low: low, high: high)
+        let labelsFit = abs(y(snapshot.previousClose * 1.02) - y(snapshot.previousClose)) >= (isLargeChart ? 16 : 11)
+        let labeledLevels = gridLevels.filter { labelsFit || $0.percent == 0 }
         for value in [high, low] {
             let grid = Path { path in
                 path.move(to: CGPoint(x: plot.minX, y: y(value)))
                 path.addLine(to: CGPoint(x: plot.maxX, y: y(value)))
             }
             context.stroke(grid, with: .color(.secondary.opacity(0.32)), lineWidth: 0.75)
-            label(String(format: "%.2f", value), at: CGPoint(x: size.width, y: y(value)), context: context)
+            if labeledLevels.allSatisfy({ abs(y($0.price) - y(value)) >= (isLargeChart ? 16 : 11) }) {
+                label(String(format: "%.2f", value), at: CGPoint(x: size.width, y: y(value)), context: context)
+            }
         }
-        let previousCloseY = y(snapshot.previousClose)
-        let reference = Path { path in
-            path.move(to: CGPoint(x: plot.minX, y: previousCloseY))
-            path.addLine(to: CGPoint(x: plot.maxX, y: previousCloseY))
-        }
-        context.stroke(reference, with: .color(.secondary.opacity(0.45)), style: StrokeStyle(lineWidth: 0.7, dash: [3, 3]))
-        if abs(previousCloseY - plot.minY) > 12 && abs(previousCloseY - plot.maxY) > 12 {
-            label(String(format: "%.2f", snapshot.previousClose), at: CGPoint(x: size.width, y: previousCloseY), context: context)
+        for level in gridLevels {
+            let levelY = y(level.price)
+            let color: Color = level.percent > 0 ? Self.rising : level.percent < 0 ? Self.falling : .secondary
+            let grid = Path { path in
+                path.move(to: CGPoint(x: plot.minX, y: levelY))
+                path.addLine(to: CGPoint(x: plot.maxX, y: levelY))
+            }
+            context.stroke(grid, with: .color(color.opacity(level.percent == 0 ? 0.65 : 0.4)),
+                           style: StrokeStyle(lineWidth: level.percent == 0 ? 1 : 0.8, dash: [4, 3]))
+            if labelsFit || level.percent == 0 {
+                let text = level.percent == 0 ? "0% 昨收" : String(format: "%+.0f%%", level.percent)
+                label(text, at: CGPoint(x: size.width, y: levelY), color: color, context: context)
+            }
         }
 
         var path = Path()
@@ -292,8 +302,8 @@ struct IntradayChartView: View {
         }
     }
 
-    private func label(_ text: String, at position: CGPoint, anchor: UnitPoint = .trailing, context: GraphicsContext) {
-        context.draw(Text(text).font(.system(size: isLargeChart ? 11 : 8, design: .monospaced)).foregroundColor(.secondary),
+    private func label(_ text: String, at position: CGPoint, anchor: UnitPoint = .trailing, color: Color = .secondary, context: GraphicsContext) {
+        context.draw(Text(text).font(.system(size: isLargeChart ? 11 : 8, design: .monospaced)).foregroundColor(color),
                      at: position, anchor: anchor)
     }
 

@@ -26,6 +26,20 @@ struct IntradaySnapshot: Sendable {
     var dayLow: Double? = nil
     var dayOpen: Double? = nil
 
+    func percentGridLevels(low: Double, high: Double) -> [(percent: Double, price: Double)] {
+        guard previousClose.isFinite, previousClose > 0, low.isFinite, high.isFinite,
+              low >= 0, high >= low else { return [] }
+        let first = ceil((low / previousClose - 1) / 0.02 - 1e-9)
+        let last = floor((high / previousClose - 1) / 0.02 + 1e-9)
+        guard first.isFinite, last.isFinite, first <= last, last - first <= 1000,
+              first >= Double(Int.min), last < Double(Int.max) else { return [] }
+        let steps = Int(first)...Int(last)
+        return steps.map { step -> (percent: Double, price: Double) in
+            let percent = Double(step) * 2.0
+            return (percent, previousClose * (1.0 + percent / 100.0))
+        }
+    }
+
     func changeFromOpenPercent(at point: IntradayPoint) -> Double? {
         guard !isOpeningAuction, let dayOpen, dayOpen.isFinite, dayOpen > 0 else { return nil }
         let percent = (point.price - dayOpen) / dayOpen * 100
@@ -225,7 +239,7 @@ final class IntradayClient: IntradayFetching, Sendable {
     func fetch(_ symbol: StockSymbol) async throws -> IntradaySnapshot {
         let normalized = try StockSymbol.parseList(symbol.id)
         guard normalized.count == 1, normalized[0] == symbol else { throw QuoteError.invalidSymbol(symbol.id) }
-        let url = URL(string: "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=" + symbol.id)!
+        let url = URL(string: "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/minute/query?code=" + symbol.id)!
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 6)
         request.httpMethod = "GET"
         let data: Data

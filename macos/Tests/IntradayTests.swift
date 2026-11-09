@@ -327,7 +327,7 @@ enum IntradayTests {
         try expect(config.urlCache == nil && config.requestCachePolicy == .reloadIgnoringLocalCacheData, "临时会话不缓存")
         try expect(config.timeoutIntervalForRequest == 6 && config.timeoutIntervalForResource == 6, "请求资源超时均6秒")
         for request in IntradayTestProtocol.transport.snapshot.requests {
-            try expect(request.url?.absoluteString == "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=sh600108", "只发送目标股票代码到固定HTTPS端点")
+            try expect(request.url?.absoluteString == "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/minute/query?code=sh600108", "分时使用腾讯官方公开入口，只发送目标股票代码")
             try expect(request.httpMethod == "GET" && request.httpBody == nil && request.timeoutInterval == 6 &&
                        request.cachePolicy == .reloadIgnoringLocalCacheData, "单GET不发持仓且不缓存")
         }
@@ -359,8 +359,29 @@ enum IntradayTests {
         do { _ = try await client.fetch(StockSymbol(code: "600108&x=1", market: "sh")); throw IntradayTestFailure(description: "无效代码未拒绝") }
         catch QuoteError.invalidSymbol { try expect(IntradayTestProtocol.transport.snapshot.requests.count == count, "无效代码在请求前拒绝") }
     }
+    static func gridTests() throws {
+        func snapshot(_ close: Double) -> IntradaySnapshot {
+            IntradaySnapshot(symbol: symbol, date: "20261109", timestamp: Date(),
+                             previousClose: close, points: [], dayOpen: 110)
+        }
+        let levels = snapshot(100).percentGridLevels(low: 95, high: 105)
+        try expect(levels.map(\.percent) == [-4, -2, 0, 2, 4], "虚线按昨收每2个百分点划分，不使用开盘价")
+        try expect(levels.map(\.price) == [96, 98, 100, 102, 104], "正负刻度映射为正确价格")
+        let boundaries = snapshot(3.35).percentGridLevels(low: 3.35 * 0.96, high: 3.35 * 1.10)
+        try expect(boundaries.map(\.percent) == [-4, -2, 0, 2, 4, 6, 8, 10], "浮点边界保留正好位于可见范围的2%刻度")
+        try expect(snapshot(100).percentGridLevels(low: 99.8, high: 100.2).map(\.percent) == [0],
+                   "窄幅走势仅画范围内的昨收线，不人为放大纵轴")
+        try expect(snapshot(100).percentGridLevels(low: 104.1, high: 107.9).map(\.percent) == [6],
+                   "只生成可见范围内的百分比线")
+        for value in [0, -1, Double.nan, Double.infinity] {
+            try expect(snapshot(value).percentGridLevels(low: 95, high: 105).isEmpty, "无效昨收不生成误导刻度")
+        }
+        for (low, high) in [(105.0, 95.0), (95, Double.infinity), (Double.nan, 105), (0, Double.greatestFiniteMagnitude)] {
+            try expect(snapshot(100).percentGridLevels(low: low, high: high).isEmpty, "非法或极端跨度不能产生无界网格")
+        }
+    }
     static func main() async {
-        do { try parserTests(); try auctionTests(); try await clientTests(); print("PASS: \(checks) intraday assertions (offline)") }
+        do { try parserTests(); try auctionTests(); try gridTests(); try await clientTests(); print("PASS: \(checks) intraday assertions (offline)") }
         catch { print("FAIL: \(error)"); exit(1) }
     }
 }

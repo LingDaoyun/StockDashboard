@@ -295,10 +295,10 @@ enum DailyKLineTests {
         for (index, request) in DailyKLineTestProtocol.transport.snapshot.requests.enumerated() {
             let url = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
             let adjustment = index.isMultiple(of: 2) ? "qfq" : ""
-            try expect(url.scheme == "https" && url.host == "web.ifzq.gtimg.cn"
-                       && url.path == "/appstock/app/fqkline/get"
+            try expect(url.scheme == "https" && url.host == "proxy.finance.qq.com"
+                       && url.path == "/ifzqgtimg/appstock/app/fqkline/get"
                        && url.queryItems == [URLQueryItem(name: "param", value: "sh600108,day,,,1000," + adjustment)],
-                       "仅向原腾讯接口发送同证券前复权及空后缀原价请求，不新增其他源")
+                       "前复权与原价均使用腾讯官方公开入口，避免已返回501的旧入口")
             try expect(request.httpMethod == "GET" && request.httpBody == nil
                        && request.cachePolicy == .reloadIgnoringLocalCacheData, "日K请求不发送持仓数据")
         }
