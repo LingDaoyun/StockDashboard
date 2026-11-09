@@ -2,7 +2,7 @@
 
 原生 macOS 桌面行情浮窗：看持仓、看指数，展开分时与日K，再双击进入可缩放、画线的大图。
 
-**Apple Silicon Mac · macOS 13+ · Swift / SwiftUI · 当前版本 1.16.1**
+**Apple Silicon Mac · macOS 13+ · Swift / SwiftUI · 当前版本 1.16.2**
 
 [功能图册](#功能图册) · [鼠标与快捷键](#鼠标与快捷键) · [构建与安装](#构建与安装) · [详细使用说明](macos/README.md)
 
@@ -27,6 +27,10 @@
 | <img src="macos/docs/images/dashboard-holdings.png" width="370" alt="持仓股看板：三只演示股票、行情字段、持仓盈亏和总盈亏"> | <img src="macos/docs/images/dashboard-indices.png" width="370" alt="综合指数看板：半导体、科创50、创业板、上证、深证、沪深300、中证500和中证1000"> |
 
 股票卡片包含现价、涨跌额/幅、量比、振幅、成交量、换手率、成交额、最低、最高和总市值。填写持仓后增加每股成本、浮盈亏和盈亏率；底部总盈亏只汇总已设置持仓的股票。红涨绿跌，未获得的数据显示「—」。
+
+从1.16.2起，名称与操作按钮保持稳定宽度，刷新、价格位数变化或暂时断线时不会被挤掉。异常提示移到股票代码旁的橙色状态点，悬停可查看「上次数据」「无行情」等状态。
+
+<img src="macos/docs/images/quote-name-stable.png" width="370" alt="暂时连接失败时中文股票名称仍完整显示，橙色状态点位于代码行，使用演示数据">
 
 顶部全A区域显示上涨/下跌家数、累计成交额，以及较上一交易日同刻的放量或缩量金额。
 
@@ -181,7 +185,7 @@
 
 ## 构建与安装
 
-当前源码为 **1.16.1 / build 50**。需要 Apple Silicon Mac、macOS 13或以上，以及 Apple Command Line Tools 提供的 `swiftc`。
+当前源码为 **1.16.2 / build 51**。需要 Apple Silicon Mac、macOS 13或以上，以及 Apple Command Line Tools 提供的 `swiftc`。
 
 ```sh
 git clone --branch master https://github.com/LingDaoyun/StockDashboard.git

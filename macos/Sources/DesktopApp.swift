@@ -785,6 +785,13 @@ struct QuoteRow: View {
             : change < 0 ? Color(red: 0.06, green: 0.59, blue: 0.38) : .primary
     }
 
+    private var rowNotice: String? {
+        if failed || unavailable { return quote == nil ? "无行情" : "上次数据" }
+        if invalidConfiguration != nil { return "配置异常" }
+        if configuration.purchaseAmountYuan != nil { return "费用预估" }
+        return nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
@@ -811,15 +818,8 @@ struct QuoteRow: View {
                                       name: symbol.code, action: showIntraday)
                     ChartToggleButton(kind: .dailyKLine, active: isChartExpanded && chartKind == .dailyKLine,
                                       name: symbol.code, action: showDailyKLine)
-                    if failed || unavailable {
-                        Text(quote == nil ? "无行情" : "上次数据")
-                            .font(.system(size: 9)).foregroundStyle(.orange)
-                    } else if invalidConfiguration != nil {
-                        Text("配置异常").font(.system(size: 9)).foregroundStyle(.orange)
-                    } else if configuration.purchaseAmountYuan != nil {
-                        Text("费用预估").font(.system(size: 9)).foregroundStyle(.orange)
-                    }
                 }
+                .fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 8)
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Text(valuationPrice.map { String(format: "%.2f", $0) } ?? "—")
@@ -829,6 +829,8 @@ struct QuoteRow: View {
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .lineLimit(1)
                 }
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
                 .foregroundStyle(movement)
                 .help(isAuction ? "集合竞价参考价：优先买一，没有有效买一时用卖一；价格、涨跌与盈亏按同一参考价估算，最终以成交价为准。双侧均无有效价时显示—。"
                       : "最新可用成交价；浮盈亏按该价格计算。")
@@ -844,6 +846,12 @@ struct QuoteRow: View {
                             .buttonStyle(.plain)
                             .help("删除这只股票")
                             .accessibilityLabel("删除\(symbol.code)")
+                        Circle()
+                            .fill(rowNotice == nil ? Color.clear : Color.orange)
+                            .frame(width: 4, height: 4)
+                            .help(rowNotice ?? "")
+                            .accessibilityLabel(rowNotice ?? "")
+                            .accessibilityHidden(rowNotice == nil)
                         Spacer(minLength: 0)
                     }
                     .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
