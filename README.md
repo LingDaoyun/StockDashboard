@@ -2,7 +2,7 @@
 
 原生 macOS 桌面行情浮窗：看持仓、看指数，展开分时与日K，再双击进入可缩放、画线的大图。
 
-**Apple Silicon Mac · macOS 13+ · Swift / SwiftUI · 当前版本 1.17.0**
+**Apple Silicon Mac · macOS 13+ · Swift / SwiftUI · 当前版本 1.17.1**
 
 [功能图册](#功能图册) · [鼠标与快捷键](#鼠标与快捷键) · [构建与安装](#构建与安装) · [详细使用说明](macos/README.md)
 
@@ -16,7 +16,7 @@
 
 ## 功能图册
 
-以下图片由 **1.15.1／1.16.x／1.17.0 的原生界面组件**生成，点击图片可查看原尺寸。持仓、报价、涨跌停、竞价和异常状态使用独立演示数据；指数大日K使用公开上证指数历史快照。图片不包含用户真实持仓，也不代表当前实时行情。为便于阅读，截图使用浅色底；实际桌面浮窗可调整背景透明度。
+以下图片由 **1.15.1／1.16.x／1.17.x 的原生界面组件**生成，点击图片可查看原尺寸。持仓、报价、涨跌停、竞价和异常状态使用独立演示数据；指数大日K使用公开上证指数历史快照。图片不包含用户真实持仓，也不代表当前实时行情。为便于阅读，截图使用浅色底；实际桌面浮窗可调整背景透明度。
 
 ### 1. 持仓看板与综合指数
 
@@ -56,11 +56,13 @@
 
 点击股票名称或「持仓」，在原卡片展开输入。当前只保留 **每股成本＋当前数量**，点击「保存成本」保存；上下提醒价可以单独设置或留空关闭。
 
-卖出后，可直接点击浮盈亏行最右侧的垃圾桶按钮清除持仓。成本和股数会立即清空，底部总盈亏同步更新；股票、分时／日K和价格提醒继续保留，无需展开持仓编辑。
+卖出后，将鼠标移到「浮盈亏」区域，标签位置会显示带垃圾桶图标的「清除」按钮；移开后恢复标签。按钮默认隐藏，显示时不挤动金额和其他列。点击后成本和股数立即清空，底部总盈亏同步更新；股票、分时／日K和价格提醒继续保留，无需展开持仓编辑。
 
-| 清除前：盈亏行右侧按钮 | 清除后：保留股票与提醒 |
+<img src="macos/docs/images/holdings-clear.png" width="370" alt="默认状态只显示成本、浮盈亏与盈亏率，隐藏清除按钮">
+
+| 悬浮浮盈亏：显示清除按钮 | 清除后：保留股票与提醒 |
 | --- | --- |
-| <img src="macos/docs/images/holdings-clear.png" width="370" alt="持仓盈亏行右侧的垃圾桶按钮，使用演示数据"> | <img src="macos/docs/images/holdings-cleared.png" width="370" alt="第一只股票清除持仓后，行情和提醒仍保留，其他股票持仓不变"> |
+| <img src="macos/docs/images/holdings-clear-hover.png" width="370" alt="鼠标悬浮第一只股票的浮盈亏区域时，标签变为清除按钮，金额位置不变"> | <img src="macos/docs/images/holdings-cleared.png" width="370" alt="第一只股票清除持仓后，行情和提醒仍保留，其他股票持仓不变"> |
 
 <img src="macos/docs/images/holdings-editor.png" width="370" alt="持仓编辑：每股成本、当前数量、上方和下方提醒价、保存成本按钮">
 
@@ -191,7 +193,7 @@
 
 ## 构建与安装
 
-当前源码为 **1.17.0 / build 52**。需要 Apple Silicon Mac、macOS 13或以上，以及 Apple Command Line Tools 提供的 `swiftc`。
+当前源码为 **1.17.1 / build 53**。需要 Apple Silicon Mac、macOS 13或以上，以及 Apple Command Line Tools 提供的 `swiftc`。
 
 ```sh
 git clone --branch master https://github.com/LingDaoyun/StockDashboard.git

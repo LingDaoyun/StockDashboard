@@ -775,6 +775,8 @@ struct QuoteRow: View {
     var showDailyKLine: () -> Void = {}
     var expandChart: () -> Void = {}
 
+    @State private var isProfitHovered = false
+
     private var profit: PositionProfit? { valuationPrice.flatMap { configuration.profit(at: $0) } }
     private var priceChange: Double? {
         guard let quote, let valuationPrice else { return nil }
@@ -892,34 +894,16 @@ struct QuoteRow: View {
             .lineLimit(1)
             .foregroundStyle(.secondary)
             if configuration.hasPosition {
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     metric("成本", value: configuration.costPrice.map { String(format: "%.3f", $0) } ?? "—")
-                        .frame(width: 88)
                         .help(configuration.perShareCostYuan.map {
                             "当前\(configuration.quantity ?? 0)股；每股成本\(NSDecimalNumber(decimal: $0).stringValue)元；按做T后成本计算，不再加费"
                         } ?? (configuration.totalCostYuan != nil
                               ? "\(configuration.quantity ?? 0)股；含费总成本\(configuration.totalCostText)元；单股成本自动计算"
                               : "\(configuration.quantity ?? 0)股；原手动成本，总成本\(configuration.totalCostText)元为估算"))
-                    metric("浮盈亏（约）", value: profit?.amountText ?? "—", titleWidth: 60)
-                        .foregroundStyle(profitColor)
-                        .help(configuration.perShareCostYuan != nil
-                              ? "盈亏＝（最新可用报价−当前每股成本）×当前数量；不再另扣手续费。每股成本请按券商做T后的值更新，显示舍入可能与券商有差异。"
-                              : configuration.purchaseAmountYuan != nil
-                              ? "费用按单笔买入委托及设置的佣金率预估；费用落账后可切换为实际含费总成本"
-                              : configuration.totalCostYuan != nil
-                              ? "浮盈亏＝最新可用报价×持仓股数−含费总成本；不再另扣手续费"
-                              : "原配置仍按单股成本×股数估算；可点击持仓填写券商当前每股成本与股数")
+                    profitMetric
                     metric("盈亏率", value: profit.flatMap(\.percent).map { String(format: "%+.2f%%", $0) } ?? "—")
-                        .frame(width: 80)
                         .foregroundStyle(profitColor)
-                    Button(action: clearPosition) {
-                        Image(systemName: "trash")
-                            .frame(width: 18, height: 16)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("清除持仓成本和股数，保留股票及价格提醒")
-                    .accessibilityLabel("清除\(symbol.code)持仓")
                 }
                 .font(.system(size: 10)).lineLimit(1).foregroundStyle(.secondary)
             }
@@ -969,6 +953,45 @@ struct QuoteRow: View {
         .frame(height: quoteRowHeight + (configuration.hasPosition ? 18 : 0)
                + (configuration.hasAlerts ? 18 : 0) + (isExpanded ? trackingEditorHeight : 0)
                + (isChartExpanded ? intradaySectionHeight : 0))
+        .onChange(of: configuration.hasPosition) { _ in isProfitHovered = false }
+    }
+
+    private var profitMetric: some View {
+        HStack(spacing: 2) {
+            Text("浮盈亏（约）")
+                .frame(width: 60, alignment: .leading)
+                .opacity(isProfitHovered ? 0 : 1)
+                .overlay(alignment: .leading) {
+                    if isProfitHovered {
+                        Button(action: clearPosition) {
+                            Label("清除", systemImage: "trash")
+                                .frame(width: 60, height: 16)
+                                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 3))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.primary.opacity(0.8))
+                        .help("清除持仓成本和股数，保留股票及价格提醒")
+                        .accessibilityLabel("清除\(symbol.code)持仓")
+                    }
+                }
+            Text(profit?.amountText ?? "—")
+                .monospacedDigit()
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .help(configuration.perShareCostYuan != nil
+                      ? "盈亏＝（最新可用报价−当前每股成本）×当前数量；不再另扣手续费。每股成本请按券商做T后的值更新，显示舍入可能与券商有差异。"
+                      : configuration.purchaseAmountYuan != nil
+                      ? "费用按单笔买入委托及设置的佣金率预估；费用落账后可切换为实际含费总成本"
+                      : configuration.totalCostYuan != nil
+                      ? "浮盈亏＝最新可用报价×持仓股数−含费总成本；不再另扣手续费"
+                      : "原配置仍按单股成本×股数估算；可点击持仓填写券商当前每股成本与股数")
+        }
+        .frame(minWidth: 0, maxWidth: .infinity)
+        .frame(height: 16)
+        .foregroundStyle(profitColor)
+        .contentShape(Rectangle())
+        .onHover { isProfitHovered = $0 }
     }
 
     private func metric(_ title: String, value: String, titleWidth: CGFloat = 30) -> some View {
