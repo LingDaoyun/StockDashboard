@@ -477,5 +477,6 @@ struct WatchlistTests {
         print("PASS: \(try runExpandedChartWindowTests()) expanded-chart window assertions")
         print("PASS: \(try runDailyChartSelectionTests()) chart selection integration assertions")
         print("PASS: \(try runStockListTests()) stock-list assertions")
+        print("PASS: \(try runListLayoutTests()) native list-layout assertions")
     }
 }

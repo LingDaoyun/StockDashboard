@@ -1236,7 +1236,9 @@ struct WidgetView: View {
             } else {
                 ScrollViewReader { scroll in
                 ScrollView {
-                    LazyVStack(spacing: 0) {
+                    // At most 20 rows. Eager layout avoids LazyVStack's anchor
+                    // relayout loop when inline charts change height during scrolling.
+                    VStack(spacing: 0) {
                         ForEach(store.visibleSymbols) { symbol in
                             QuoteRow(symbol: symbol, quote: store.quotes[symbol.id],
                                      valuationPrice: store.valuationPrice(for: symbol), isAuction: store.isAuction,

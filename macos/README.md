@@ -285,6 +285,7 @@
 - `Tests/ExpandedChartWindowTests.swift`：大图显示、关闭、切换证券和图表类型的原生窗口行为。
 - `Tests/PerShareEntryTests.swift`：单一每股成本录入、旧成本兼容及提醒保存隔离。
 - `Tests/StockListTests.swift`：持仓与指数页切换、列表过滤和展开图表行为。
+- `Tests/ListLayoutTests.swift`：真实原生窗口中8／20只股票的滚动、图表及持仓编辑展开收起、指数页切换；后台超时检测主线程布局卡死，使用隔离设置且不联网。
 - `Tests/MarketOverviewTests.swift`：全A字段、同刻成交额口径、源时间、无效数据与网络恢复。
 - `Tests/MarketRefreshTests.swift`：大盘独立刷新、空自选、断线重试、暂停唤醒及持仓隔离。
 - `Tests/QuoteClientTests.swift`：会话生命周期复用、无缓存、请求错误、取消及断线后恢复，使用本地模拟响应。

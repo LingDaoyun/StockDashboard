@@ -69,7 +69,8 @@ struct IndexDashboardView: View {
     var body: some View {
         ScrollViewReader { scroll in
             ScrollView {
-                LazyVStack(spacing: 8) {
+                // Only four rows; measure expanded charts without lazy anchor estimation.
+                VStack(spacing: 8) {
                     ForEach(0..<(DashboardIndex.all.count / 2), id: \.self) { row in
                         let indices = Array(DashboardIndex.all[(row * 2)..<(row * 2 + 2)])
                         HStack(spacing: 8) {
