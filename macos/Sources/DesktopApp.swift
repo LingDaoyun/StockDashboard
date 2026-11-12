@@ -1116,7 +1116,6 @@ struct WidgetView: View {
     let add: () -> Void
     let pin: () -> Void
     let autoHide: () -> Void
-    let hide: () -> Void
     let configure: (StockSymbol) -> Void
     var intraday: (StockSymbol) -> Void = { _ in }
     var dailyKLine: (StockSymbol) -> Void = { _ in }
@@ -1236,8 +1235,6 @@ struct WidgetView: View {
                         .zIndex(1)
                 } else if !store.isAdjustingTransparency {
                     HStack(spacing: 8) {
-                        toolButton("list.bullet", help: store.isCompactMode ? "切换到丰富模式" : "切换到极简模式",
-                                   selected: store.isCompactMode, action: store.toggleCompactMode)
                         HStack(spacing: 10) {
                             ForEach(StockList.allCases, id: \.self) { list in
                                 Button { store.selectList(list) } label: {
@@ -1292,18 +1289,21 @@ struct WidgetView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
+                if !store.isAddingStock && !store.isAdjustingTransparency {
+                    toolButton("list.bullet", help: store.isCompactMode ? "切换到丰富模式" : "切换到极简模式",
+                               selected: store.isCompactMode, action: store.toggleCompactMode)
+                }
                 toolButton(store.isAdjustingTransparency ? "xmark" : "gearshape",
                            help: store.isAdjustingTransparency ? "收起透明度滑条" : "调整背景透明度",
                            action: transparency)
-                toolButton("minus", help: "隐藏浮窗（菜单栏可重新显示）", action: hide)
             }
             .padding(.horizontal, 16)
             .frame(height: 48)
             .zIndex(1)
-            Divider().opacity(0.6)
+            Divider().opacity(store.backgroundTransparency >= 1 ? 0 : 0.6)
             MarketOverviewView(snapshot: store.marketOverview, notice: store.marketError, now: store.marketNow,
                                showIndex: store.selectedList == .holdings)
-            Divider().opacity(0.6)
+            Divider().opacity(store.backgroundTransparency >= 1 ? 0 : 0.6)
             if store.selectedList == .indices {
                 IndexDashboardView(quotes: store.quotes, unavailable: store.unavailable,
                                    error: store.errorMessage, now: store.marketNow,
@@ -1319,7 +1319,8 @@ struct WidgetView: View {
                                    closeChart: { store.closeIntraday() }, expandChart: expandChart,
                                    isCompact: store.isCompactMode,
                                    expandedCompactSymbolIDs: store.expandedCompactSymbolIDs,
-                                   toggleCompactRow: { store.toggleCompactRow(for: $0) })
+                                   toggleCompactRow: { store.toggleCompactRow(for: $0) },
+                                   showsSeparators: store.backgroundTransparency < 1)
             } else if store.visibleSymbols.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "plus.square.dashed")
@@ -1376,7 +1377,10 @@ struct WidgetView: View {
                                      isCompactExpanded: store.expandedCompactSymbolIDs.contains(symbol.id),
                                      toggleCompactExpansion: { store.toggleCompactRow(for: symbol) })
                                 .id(symbol.id)
-                            if symbol != store.visibleSymbols.last { Divider().padding(.horizontal, 16).opacity(0.6) }
+                            if symbol != store.visibleSymbols.last {
+                                Divider().padding(.horizontal, 16)
+                                    .opacity(store.backgroundTransparency >= 1 ? 0 : 0.6)
+                            }
                         }
                     }
                 }
@@ -1390,7 +1394,7 @@ struct WidgetView: View {
                 }
                 .id(store.selectedList)
             }
-            Divider().opacity(0.6)
+            Divider().opacity(store.backgroundTransparency >= 1 ? 0 : 0.6)
             HStack(spacing: 6) {
                 Circle()
                     .fill(statusColor)
@@ -1426,7 +1430,8 @@ struct WidgetView: View {
         }
         .background(Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.10), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 16)
+            .stroke(Color.primary.opacity(store.backgroundTransparency >= 1 ? 0 : 0.10), lineWidth: 1))
         .onExitCommand {
             store.isAddingStock = false
             store.isAdjustingTransparency = false
@@ -1688,7 +1693,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.ignoresMouseEvents = false
-        panel.hasShadow = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.level = store.isPinned ? .floating : .normal
         let surface = DesktopHoverView()
@@ -1710,7 +1714,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
                                                                add: { [weak self] in self?.addStock() },
                                                                pin: { [weak self] in self?.togglePin() },
                                                                autoHide: { [weak self] in self?.toggleAutoHide() },
-                                                               hide: { [weak self] in self?.hidePanel() },
                                                                configure: { [weak self] symbol in self?.toggleTracking(symbol) },
                                                                intraday: { [weak self] symbol in self?.toggleIntraday(symbol) },
                                                                dailyKLine: { [weak self] symbol in self?.toggleIntraday(symbol, kind: .dailyKLine) },
@@ -1766,6 +1769,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     private func applyTransparency(_ value: Double) {
         glassView?.alphaValue = 1 - value
         glassView?.isHidden = value >= 1
+        // A transparent window's shadow follows its opaque text and controls,
+        // producing a blurred halo around the glyphs instead of a panel shadow.
+        panel?.hasShadow = value < 1
         panel?.invalidateShadow()
     }
 

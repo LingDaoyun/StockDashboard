@@ -74,6 +74,7 @@ struct IndexDashboardView: View {
     var isCompact = false
     var expandedCompactSymbolIDs: Set<String> = []
     var toggleCompactRow: (StockSymbol) -> Void = { _ in }
+    var showsSeparators = true
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -98,7 +99,7 @@ struct IndexDashboardView: View {
                                     .id("chart-" + index.id)
                             }
                             if index.id != DashboardIndex.all.last?.id {
-                                Divider().padding(.horizontal, 16).opacity(0.6)
+                                Divider().padding(.horizontal, 16).opacity(showsSeparators ? 0.6 : 0)
                             }
                         }
                     }

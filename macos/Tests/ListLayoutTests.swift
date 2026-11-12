@@ -65,7 +65,7 @@ func runListLayoutTests() throws -> Int {
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         let host = NSHostingView(rootView: WidgetView(store: store, transparency: {}, add: {},
-                                                       pin: {}, autoHide: {}, hide: {},
+                                                       pin: {}, autoHide: {},
                                                        configure: { store.expandedSymbolID = $0.id },
                                                        intraday: { store.toggleIntraday(for: $0) },
                                                        dailyKLine: { store.toggleDailyKLine(for: $0) }))
