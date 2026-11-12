@@ -849,7 +849,7 @@ struct QuoteRow: View {
     }
 
     private var compactSummary: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Text(quote?.name ?? symbol.code)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(failed || unavailable ? Color.orange : Color.primary)
@@ -880,6 +880,17 @@ struct QuoteRow: View {
             .help(isCompactExpanded ? "收起丰富行情" : "展开丰富行情")
             .accessibilityLabel("\(isCompactExpanded ? "收起" : "展开")\(symbol.code)丰富行情")
             .accessibilityValue(isCompactExpanded ? "已展开" : "未展开")
+            Button(action: remove) {
+                Image(systemName: "xmark.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.secondary)
+                    .frame(width: 20, height: compactQuoteRowHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("删除这只股票")
+            .accessibilityLabel("删除\(symbol.code)")
+            .accessibilityIdentifier("compact-remove-\(symbol.id)")
         }
         .font(.system(size: 13, weight: .medium))
         .monospacedDigit()
