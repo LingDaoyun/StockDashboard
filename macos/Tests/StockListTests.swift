@@ -245,5 +245,31 @@ func runStockListTests() throws -> Int {
     try check(compact.expandedCompactSymbolIDs.isEmpty && compact.listHeight == 28,
               "删除展开股票后清理展开状态和高度")
     try check(!legacy.isCompactMode, "没有保存模式的用户默认保持丰富模式")
+    compact.selectList(.indices)
+    try check(compact.listHeight == 231, "极简模式下八个指数按单行高度展示")
+    compact.toggleCompactRow(for: index)
+    try check(compact.listHeight == 359 && compact.expandedCompactSymbolIDs == [index.id],
+              "指数单行可独立展开原有丰富卡片")
+    compact.toggleCompactRow(for: otherIndex)
+    try check(compact.listHeight == 487 && compact.expandedCompactSymbolIDs == Set([index.id, otherIndex.id]),
+              "同时展开两个指数时按内容调整窗口高度")
+    compact.toggleDailyKLine(for: index)
+    try check(compact.listHeight == 570 && compact.expandedChartSymbolID == index.id,
+              "指数极简模式可打开日K并将视口限制在570像素")
+    compact.toggleCompactRow(for: index)
+    try check(compact.expandedChartSymbolID == nil && compact.expandedCompactSymbolIDs == [otherIndex.id]
+              && compact.listHeight == 359, "收起指数行关闭对应图表，保留另一行")
+    compact.toggleIntraday(for: index)
+    try check(compact.expandedCompactSymbolIDs.contains(index.id), "直接打开图表自动展开对应极简行")
+    compact.toggleCompactMode()
+    try check(compact.listHeight == IndexDashboardView.height && compact.expandedChartSymbolID == nil
+              && compact.expandedCompactSymbolIDs.isEmpty, "退出指数极简模式恢复原有两列布局并关闭图表")
+    compact.toggleCompactMode()
+    compact.removeSymbol(index)
+    try check(compact.visibleSymbols == DashboardIndex.symbols && compact.listHeight == 231,
+              "极简模式仍保留固定指数目录，不允许删除指数")
+    compact.selectList(.holdings)
+    try check(compact.isCompactMode && compact.visibleSymbols == [first] && compact.listHeight == 28,
+              "切回股票页保留同一极简模式且不混入指数展开状态")
     return checks
 }

@@ -49,6 +49,12 @@ struct IndexDashboardView: View {
     static let height: CGFloat = 496
     static let expandedHeight: CGFloat = 570
 
+    static func compactHeight(expandedRowCount: Int, hasChart: Bool) -> CGFloat {
+        min(CGFloat(DashboardIndex.all.count * 28 + DashboardIndex.all.count - 1)
+            + CGFloat(expandedRowCount) * 128
+            + (hasChart ? IntradayChartView.height + 52 : 0), expandedHeight)
+    }
+
     let quotes: [String: Quote]
     let unavailable: Set<String>
     let error: String?
@@ -65,33 +71,64 @@ struct IndexDashboardView: View {
     let showDailyKLine: (StockSymbol) -> Void
     let closeChart: () -> Void
     var expandChart: () -> Void = {}
+    var isCompact = false
+    var expandedCompactSymbolIDs: Set<String> = []
+    var toggleCompactRow: (StockSymbol) -> Void = { _ in }
 
     var body: some View {
         ScrollViewReader { scroll in
             ScrollView {
-                // Only four rows; measure expanded charts without lazy anchor estimation.
-                VStack(spacing: 8) {
-                    ForEach(0..<(DashboardIndex.all.count / 2), id: \.self) { row in
-                        let indices = Array(DashboardIndex.all[(row * 2)..<(row * 2 + 2)])
-                        HStack(spacing: 8) {
-                            ForEach(indices) { index in
-                                IndexCard(index: index, quote: quotes[index.id],
-                                          unavailable: unavailable.contains(index.id), error: error, now: now,
-                                          isChartExpanded: expandedChartSymbolID == index.id,
-                                          chartKind: chartKind,
-                                          showIntraday: { showIntraday(index.symbol) },
-                                          showDailyKLine: { showDailyKLine(index.symbol) })
+                // Measure expanded charts without lazy anchor estimation in either mode.
+                if isCompact {
+                    VStack(spacing: 0) {
+                        ForEach(DashboardIndex.all) { index in
+                            IndexCard(index: index, quote: quotes[index.id],
+                                      unavailable: unavailable.contains(index.id), error: error, now: now,
+                                      isChartExpanded: expandedChartSymbolID == index.id,
+                                      chartKind: chartKind,
+                                      showIntraday: { showIntraday(index.symbol) },
+                                      showDailyKLine: { showDailyKLine(index.symbol) },
+                                      isCompact: true,
+                                      isCompactExpanded: expandedCompactSymbolIDs.contains(index.id),
+                                      toggleCompactExpansion: { toggleCompactRow(index.symbol) })
+                            if expandedCompactSymbolIDs.contains(index.id), expandedChartSymbolID == index.id {
+                                chart(for: index)
+                                    .padding(.horizontal, 16)
+                                    .padding(.bottom, 8)
+                                    .id("chart-" + index.id)
+                            }
+                            if index.id != DashboardIndex.all.last?.id {
+                                Divider().padding(.horizontal, 16).opacity(0.6)
                             }
                         }
-                        if let index = indices.first(where: { $0.id == expandedChartSymbolID }) {
-                            chart(for: index)
-                                .id("chart-" + index.id)
+                    }
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(0..<(DashboardIndex.all.count / 2), id: \.self) { row in
+                            let indices = Array(DashboardIndex.all[(row * 2)..<(row * 2 + 2)])
+                            HStack(spacing: 8) {
+                                ForEach(indices) { index in
+                                    IndexCard(index: index, quote: quotes[index.id],
+                                              unavailable: unavailable.contains(index.id), error: error, now: now,
+                                              isChartExpanded: expandedChartSymbolID == index.id,
+                                              chartKind: chartKind,
+                                              showIntraday: { showIntraday(index.symbol) },
+                                              showDailyKLine: { showDailyKLine(index.symbol) })
+                                }
+                            }
+                            if let index = indices.first(where: { $0.id == expandedChartSymbolID }) {
+                                chart(for: index)
+                                    .id("chart-" + index.id)
+                            }
                         }
                     }
+                    .padding(12)
                 }
-                .padding(12)
             }
-            .frame(height: expandedChartSymbolID == nil ? Self.height : Self.expandedHeight)
+            .frame(height: isCompact
+                   ? Self.compactHeight(expandedRowCount: expandedCompactSymbolIDs.count,
+                                        hasChart: expandedChartSymbolID.map { expandedCompactSymbolIDs.contains($0) } ?? false)
+                   : expandedChartSymbolID == nil ? Self.height : Self.expandedHeight)
             .onChange(of: expandedChartSymbolID) { id in
                 guard let id else { return }
                 DispatchQueue.main.async {
@@ -146,6 +183,9 @@ private struct IndexCard: View {
     let chartKind: ChartKind
     let showIntraday: () -> Void
     let showDailyKLine: () -> Void
+    var isCompact = false
+    var isCompactExpanded = false
+    var toggleCompactExpansion: () -> Void = {}
 
     private static let rising = Color(red: 0.85, green: 0.19, blue: 0.24)
     private static let falling = Color(red: 0.06, green: 0.59, blue: 0.38)
@@ -158,6 +198,55 @@ private struct IndexCard: View {
     }()
 
     var body: some View {
+        if isCompact {
+            VStack(spacing: 0) {
+                compactSummary
+                if isCompactExpanded {
+                    detailedContent
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                }
+            }
+        } else {
+            detailedContent
+        }
+    }
+
+    private var compactSummary: some View {
+        HStack(spacing: 6) {
+            Text(index.title)
+                .foregroundStyle(warning == nil ? Color.primary : Color.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(details)
+            Text(quote.map { String(format: "%+.2f%%", $0.changePercent) } ?? "—")
+                .foregroundStyle(changeColor)
+                .frame(width: 60, alignment: .trailing)
+            Text(quote.map { Self.point($0.price) } ?? "—")
+                .foregroundStyle(changeColor)
+                .frame(width: 58, alignment: .trailing)
+                .help("指数当前点位")
+            Button(action: toggleCompactExpansion) {
+                Image(systemName: isCompactExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isCompactExpanded ? Color.accentColor : Color.secondary)
+                    .frame(width: 20, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isCompactExpanded ? "收起丰富行情" : "展开丰富行情")
+            .accessibilityLabel("\(isCompactExpanded ? "收起" : "展开")\(index.title)丰富行情")
+            .accessibilityValue(isCompactExpanded ? "已展开" : "未展开")
+            Color.clear.frame(width: 20).accessibilityHidden(true)
+        }
+        .font(.system(size: 13, weight: .medium))
+        .monospacedDigit()
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
+        .padding(.horizontal, 16)
+        .frame(height: 28)
+    }
+
+    private var detailedContent: some View {
         Button(action: showIntraday) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 4) {

@@ -167,14 +167,23 @@ func runListLayoutTests() throws -> Int {
             try check(store.expandedCompactSymbolIDs.isEmpty,
                       "tab switch must clear compact row expansions")
             for index in [DashboardIndex.all.last!, DashboardIndex.all.first!] {
+                store.toggleCompactRow(for: index.symbol)
+                try settle("cycle \(cycle), expand index compact row \(index.id)")
                 try scrollToEdge(bottom: true)
                 store.toggleIntraday(for: index.symbol)
                 try settle("cycle \(cycle), expand index \(index.id)")
                 store.toggleDailyKLine(for: index.symbol)
                 try settle("cycle \(cycle), index daily chart")
-                store.closeIntraday()
-                try settle("cycle \(cycle), close index chart")
+                store.toggleCompactRow(for: index.symbol)
+                try settle("cycle \(cycle), collapse index compact row and chart")
+                try check(store.expandedChartSymbolID == nil && !store.expandedCompactSymbolIDs.contains(index.id),
+                          "collapsing a compact index row must close its chart")
             }
+            store.toggleCompactMode()
+            try settle("cycle \(cycle), index rich mode")
+            try check(store.listHeight == IndexDashboardView.height, "index rich mode retains the two-column viewport")
+            store.toggleCompactMode()
+            try settle("cycle \(cycle), index compact mode again")
             store.selectList(.holdings)
             try settle("cycle \(cycle), holdings tab")
             try check(store.visibleSymbols.count == count && store.expandedChartSymbolID == nil,

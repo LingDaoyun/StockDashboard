@@ -192,7 +192,7 @@ final class QuoteStore: ObservableObject {
     }
 
     func toggleCompactRow(for symbol: StockSymbol) {
-        guard isCompactMode, selectedList == .holdings, symbols.contains(symbol) else { return }
+        guard isCompactMode, visibleSymbols.contains(symbol) else { return }
         if expandedCompactSymbolIDs.contains(symbol.id) {
             if expandedSymbolID == symbol.id { expandedSymbolID = nil }
             if expandedChartSymbolID == symbol.id { closeIntraday() }
@@ -235,6 +235,10 @@ final class QuoteStore: ObservableObject {
 
     var listHeight: CGFloat {
         if selectedList == .indices {
+            if isCompactMode {
+                return IndexDashboardView.compactHeight(expandedRowCount: expandedCompactSymbolIDs.count,
+                                                       hasChart: expandedChartSymbolID != nil)
+            }
             return expandedChartSymbolID == nil ? IndexDashboardView.height : IndexDashboardView.expandedHeight
         }
         let symbols = visibleSymbols
@@ -598,6 +602,7 @@ final class QuoteStore: ObservableObject {
         closeIntraday()
         if opening {
             expandedSymbolID = nil
+            if isCompactMode { expandedCompactSymbolIDs.insert(symbol.id) }
             chartKind = kind
             expandedChartSymbolID = symbol.id
             if kind == .dailyKLine { refreshDailyKLine(force: true) }
@@ -855,20 +860,21 @@ struct QuoteRow: View {
                 .foregroundStyle(failed || unavailable ? Color.orange : Color.primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .help("\(quote?.name ?? symbol.code) · \(symbol.id.uppercased())\(rowNotice.map { " · " + $0 } ?? "")")
+            Text(profit?.amountText ?? "")
+                .minimumScaleFactor(0.75)
+                .frame(width: 70, alignment: .trailing)
+                .foregroundStyle(profitColor)
+                .help(profit.map { "持仓浮盈亏（元）：\($0.amountText)。与丰富模式使用相同持仓成本和报价计算。" } ?? "")
+                .accessibilityLabel("持仓浮盈亏（元）")
+                .accessibilityValue(profit?.amountText ?? "")
+                .accessibilityHidden(profit == nil)
+            Text(compactChangePercent.map { String(format: "%+.2f%%", $0) } ?? "—")
+                .frame(width: 60, alignment: .trailing)
+                .foregroundStyle(movement)
             Text(valuationPrice.map { String(format: "%.2f", $0) } ?? "—")
                 .frame(width: 58, alignment: .trailing)
                 .foregroundStyle(movement)
                 .help(isAuction ? "集合竞价参考价，与丰富模式使用相同口径" : "最新可用成交价")
-            Text(compactChangePercent.map { String(format: "%+.2f%%", $0) } ?? "—")
-                .frame(width: 60, alignment: .trailing)
-                .foregroundStyle(movement)
-            Text(profit?.amountText ?? "—")
-                .minimumScaleFactor(0.75)
-                .frame(width: 70, alignment: .trailing)
-                .foregroundStyle(profitColor)
-                .help("持仓浮盈亏（元）：\(profit?.amountText ?? (configuration.hasPosition ? "等待行情" : "未设置持仓"))。与丰富模式使用相同持仓成本和报价计算。")
-                .accessibilityLabel("持仓浮盈亏（元）")
-                .accessibilityValue(profit?.amountText ?? "—")
             Button(action: toggleCompactExpansion) {
                 Image(systemName: isCompactExpanded ? "chevron.up" : "chevron.down")
                     .font(.system(size: 10, weight: .semibold))
@@ -1230,17 +1236,8 @@ struct WidgetView: View {
                         .zIndex(1)
                 } else if !store.isAdjustingTransparency {
                     HStack(spacing: 8) {
-                        if store.selectedList == .holdings {
-                            toolButton("list.bullet", help: store.isCompactMode ? "切换到丰富模式" : "切换到极简模式",
-                                       selected: store.isCompactMode, action: store.toggleCompactMode)
-                        } else {
-                            Image(systemName: "chart.xyaxis.line")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(Color.accentColor)
-                                .frame(width: 18, height: 48)
-                                .overlay(WindowDraggingArea())
-                                .help(store.isPreview ? "A股行情 · 测试预览" : "A股桌面行情")
-                        }
+                        toolButton("list.bullet", help: store.isCompactMode ? "切换到丰富模式" : "切换到极简模式",
+                                   selected: store.isCompactMode, action: store.toggleCompactMode)
                         HStack(spacing: 10) {
                             ForEach(StockList.allCases, id: \.self) { list in
                                 Button { store.selectList(list) } label: {
@@ -1319,7 +1316,10 @@ struct WidgetView: View {
                                    dailyKLineError: store.dailyKLineError,
                                    isDailyKLineRefreshing: store.isDailyKLineRefreshing,
                                    showIntraday: intraday, showDailyKLine: dailyKLine,
-                                   closeChart: { store.closeIntraday() }, expandChart: expandChart)
+                                   closeChart: { store.closeIntraday() }, expandChart: expandChart,
+                                   isCompact: store.isCompactMode,
+                                   expandedCompactSymbolIDs: store.expandedCompactSymbolIDs,
+                                   toggleCompactRow: { store.toggleCompactRow(for: $0) })
             } else if store.visibleSymbols.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "plus.square.dashed")
@@ -1628,7 +1628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         addItem("隐藏浮窗", action: #selector(hidePanel), to: menu)
         menu.addItem(.separator())
         addItem("添加股票…", action: #selector(addStock), to: menu)
-        compactModeItem = addItem("持仓股极简模式", action: #selector(toggleCompactMode), to: menu)
+        compactModeItem = addItem("极简模式", action: #selector(toggleCompactMode), to: menu)
         addItem("背景透明度", action: #selector(toggleTransparency), to: menu)
         addItem("启用提醒通知", action: #selector(prepareNotifications), to: menu)
         addItem("立即刷新", action: #selector(refresh), to: menu)
