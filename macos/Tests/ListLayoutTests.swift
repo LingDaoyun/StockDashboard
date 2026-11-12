@@ -100,7 +100,8 @@ func runListLayoutTests() throws -> Int {
             try settle("scroll \(bottom ? "bottom" : "top")", duration: 0.03)
             try check(scroll.contentView.bounds.origin.y.isFinite,
                       "scroll offset must remain finite")
-            if bottom && store.selectedList == .holdings && store.expandedChartSymbolID == nil {
+            if bottom && store.selectedList == .holdings && store.expandedChartSymbolID == nil
+                && (!store.isCompactMode || maximum > 0) {
                 try check(scroll.contentView.bounds.origin.y > 0, "long holdings list must actually scroll")
             }
         }
@@ -124,8 +125,47 @@ func runListLayoutTests() throws -> Int {
                 try settle("cycle \(cycle), close holdings editor")
             }
 
+            store.toggleCompactMode()
+            try settle("cycle \(cycle), compact mode")
+            try check(store.isCompactMode && store.expandedCompactSymbolIDs.isEmpty,
+                      "entering compact mode must show collapsed single-line rows")
+            try scrollToEdge(bottom: true)
+            let edgeSymbols = [store.symbols.first!, store.symbols.last!]
+            for symbol in edgeSymbols { store.toggleCompactRow(for: symbol) }
+            try settle("cycle \(cycle), expand first and last compact rows")
+            try check(store.expandedCompactSymbolIDs == Set(edgeSymbols.map(\.id)),
+                      "compact rows must expand independently")
+            for symbol in edgeSymbols {
+                try scrollToEdge(bottom: true)
+                store.toggleIntraday(for: symbol)
+                try settle("cycle \(cycle), compact row \(symbol.id) intraday")
+                store.toggleDailyKLine(for: symbol)
+                store.expandedSymbolID = symbol.id
+                try settle("cycle \(cycle), compact row \(symbol.id) daily chart and editor")
+                store.toggleCompactRow(for: symbol)
+                try settle("cycle \(cycle), collapse compact row \(symbol.id)")
+                try check(!store.expandedCompactSymbolIDs.contains(symbol.id)
+                          && store.expandedChartSymbolID == nil && store.expandedSymbolID == nil,
+                          "collapsing a compact row must close its chart and holdings editor")
+            }
+            try scrollToEdge(bottom: false)
+
+            store.toggleCompactRow(for: edgeSymbols[0])
+            store.toggleIntraday(for: edgeSymbols[0])
+            store.expandedSymbolID = edgeSymbols[0].id
+            try settle("cycle \(cycle), compact row before mode switch")
+            store.toggleCompactMode()
+            try settle("cycle \(cycle), return to rich mode")
+            try check(!store.isCompactMode && store.expandedCompactSymbolIDs.isEmpty
+                      && store.expandedChartSymbolID == nil && store.expandedSymbolID == nil,
+                      "mode switch must clear compact expansions and nested content")
+            store.toggleCompactMode()
+            for symbol in edgeSymbols { store.toggleCompactRow(for: symbol) }
+            try settle("cycle \(cycle), compact rows before tab switch")
             store.selectList(.indices)
             try settle("cycle \(cycle), indices tab")
+            try check(store.expandedCompactSymbolIDs.isEmpty,
+                      "tab switch must clear compact row expansions")
             for index in [DashboardIndex.all.last!, DashboardIndex.all.first!] {
                 try scrollToEdge(bottom: true)
                 store.toggleIntraday(for: index.symbol)
@@ -139,7 +179,11 @@ func runListLayoutTests() throws -> Int {
             try settle("cycle \(cycle), holdings tab")
             try check(store.visibleSymbols.count == count && store.expandedChartSymbolID == nil,
                       "tab round trip must retain all holdings and close the index chart")
+            try check(store.isCompactMode && store.expandedCompactSymbolIDs.isEmpty,
+                      "tab round trip must retain compact mode with all rows collapsed")
             try scrollToEdge(bottom: false)
+            store.toggleCompactMode()
+            try settle("cycle \(cycle), restore rich mode after tab round trip")
         }
         print("PASS: native layout interactions with \(count) holdings")
     }

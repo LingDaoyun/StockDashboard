@@ -4,6 +4,7 @@ import Combine
 import UserNotifications
 
 private let quoteRowHeight: CGFloat = 96
+private let compactQuoteRowHeight: CGFloat = 28
 private let trackingEditorHeight: CGFloat = 192
 private let intradaySectionHeight: CGFloat = IntradayChartView.height + 12
 
@@ -24,6 +25,10 @@ final class QuoteStore: ObservableObject {
     // Retain retired watchlist data without polling it or firing its alerts.
     let legacyWatchlistSymbols: [StockSymbol]
     @Published private(set) var selectedList: StockList = .holdings
+    @Published private(set) var isCompactMode: Bool {
+        didSet { defaults.set(isCompactMode, forKey: "compactMode") }
+    }
+    @Published private(set) var expandedCompactSymbolIDs: Set<String> = []
     @Published private(set) var quotes: [String: Quote] = [:]
     @Published private(set) var unavailable: Set<String> = []
     @Published private(set) var lastReceipt: Date?
@@ -131,6 +136,7 @@ final class QuoteStore: ObservableObject {
         self.legacyWatchlistSymbols = preview == nil
             ? (try? StockSymbol.parseList(defaults.string(forKey: "watchlistSymbols") ?? "")) ?? [] : []
         self.isPinned = defaults.object(forKey: "pinned") as? Bool ?? false
+        self.isCompactMode = defaults.bool(forKey: "compactMode")
         self.buyCommissionRate = defaults.string(forKey: "buyCommissionRate") ?? "2.5"
         self.autoHideEnabled = defaults.object(forKey: "autoHideEnabled") as? Bool ?? true
         self.backgroundTransparency = min(1, max(0, defaults.object(forKey: "backgroundTransparency") as? Double ?? 0.3))
@@ -168,6 +174,7 @@ final class QuoteStore: ObservableObject {
         guard selectedList != list else { return }
         isAddingStock = false
         expandedSymbolID = nil
+        expandedCompactSymbolIDs.removeAll()
         closeIntraday()
         selectedList = list
         request?.cancel()
@@ -175,6 +182,24 @@ final class QuoteStore: ObservableObject {
         isRefreshing = false
         refresh()
         scheduleNextTick()
+    }
+
+    func toggleCompactMode() {
+        expandedSymbolID = nil
+        expandedCompactSymbolIDs.removeAll()
+        closeIntraday()
+        isCompactMode.toggle()
+    }
+
+    func toggleCompactRow(for symbol: StockSymbol) {
+        guard isCompactMode, selectedList == .holdings, symbols.contains(symbol) else { return }
+        if expandedCompactSymbolIDs.contains(symbol.id) {
+            if expandedSymbolID == symbol.id { expandedSymbolID = nil }
+            if expandedChartSymbolID == symbol.id { closeIntraday() }
+            expandedCompactSymbolIDs.remove(symbol.id)
+        } else {
+            expandedCompactSymbolIDs.insert(symbol.id)
+        }
     }
 
     var marketSession: MarketSession { MarketClock.session(at: marketNow) }
@@ -215,8 +240,12 @@ final class QuoteStore: ObservableObject {
         let symbols = visibleSymbols
         if symbols.isEmpty { return 198 }
         return min(symbols.reduce(CGFloat(max(0, symbols.count - 1))) { total, symbol in
+            let summaryHeight = isCompactMode ? compactQuoteRowHeight : 0
+            if isCompactMode && !expandedCompactSymbolIDs.contains(symbol.id) {
+                return total + summaryHeight
+            }
             let configuration = tracking[symbol.id]
-            return total + quoteRowHeight
+            return total + summaryHeight + quoteRowHeight
                 + (configuration?.hasPosition == true ? 18 : 0)
                 + (configuration?.hasAlerts == true ? 18 : 0)
                 + (expandedSymbolID == symbol.id ? trackingEditorHeight : 0)
@@ -438,6 +467,7 @@ final class QuoteStore: ObservableObject {
         undecodableTracking = undecodableTracking.filter { savedIDs.contains($0.key) }
         priceAlerts = priceAlerts.filter { ids.contains($0.key) }
         let visibleIDs = Set(visibleSymbols.map(\.id))
+        expandedCompactSymbolIDs.formIntersection(visibleIDs)
         if let expandedSymbolID, !visibleIDs.contains(expandedSymbolID) { self.expandedSymbolID = nil }
         if let expandedChartSymbolID, !visibleIDs.contains(expandedChartSymbolID) { closeIntraday() }
         persistTracking()
@@ -774,6 +804,9 @@ struct QuoteRow: View {
     var showIntraday: () -> Void = {}
     var showDailyKLine: () -> Void = {}
     var expandChart: () -> Void = {}
+    var isCompact = false
+    var isCompactExpanded = false
+    var toggleCompactExpansion: () -> Void = {}
 
     @State private var isProfitHovered = false
 
@@ -809,6 +842,60 @@ struct QuoteRow: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            if isCompact { compactSummary }
+            if !isCompact || isCompactExpanded { detailedContent }
+        }
+    }
+
+    private var compactSummary: some View {
+        HStack(spacing: 8) {
+            Text(quote?.name ?? symbol.code)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(failed || unavailable ? Color.orange : Color.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help("\(quote?.name ?? symbol.code) · \(symbol.id.uppercased())\(rowNotice.map { " · " + $0 } ?? "")")
+            Text(valuationPrice.map { String(format: "%.2f", $0) } ?? "—")
+                .frame(width: 58, alignment: .trailing)
+                .foregroundStyle(movement)
+                .help(isAuction ? "集合竞价参考价，与丰富模式使用相同口径" : "最新可用成交价")
+            Text(compactChangePercent.map { String(format: "%+.2f%%", $0) } ?? "—")
+                .frame(width: 60, alignment: .trailing)
+                .foregroundStyle(movement)
+            Text(profit?.amountText ?? "—")
+                .minimumScaleFactor(0.75)
+                .frame(width: 70, alignment: .trailing)
+                .foregroundStyle(profitColor)
+                .help("持仓浮盈亏（元）：\(profit?.amountText ?? (configuration.hasPosition ? "等待行情" : "未设置持仓"))。与丰富模式使用相同持仓成本和报价计算。")
+                .accessibilityLabel("持仓浮盈亏（元）")
+                .accessibilityValue(profit?.amountText ?? "—")
+            Button(action: toggleCompactExpansion) {
+                Image(systemName: isCompactExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isCompactExpanded ? Color.accentColor : Color.secondary)
+                    .frame(width: 20, height: compactQuoteRowHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isCompactExpanded ? "收起丰富行情" : "展开丰富行情")
+            .accessibilityLabel("\(isCompactExpanded ? "收起" : "展开")\(symbol.code)丰富行情")
+            .accessibilityValue(isCompactExpanded ? "已展开" : "未展开")
+        }
+        .font(.system(size: 13, weight: .medium))
+        .monospacedDigit()
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
+        .padding(.horizontal, 16)
+        .frame(height: compactQuoteRowHeight)
+    }
+
+    private var compactChangePercent: Double? {
+        guard let quote, let change = priceChange else { return nil }
+        if !isAuction { return quote.changePercent }
+        return quote.previousClose > 0 ? change / quote.previousClose * 100 : nil
+    }
+
+    private var detailedContent: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline) {
                 HStack(spacing: 5) {
@@ -1132,12 +1219,17 @@ struct WidgetView: View {
                         .zIndex(1)
                 } else if !store.isAdjustingTransparency {
                     HStack(spacing: 8) {
-                        Image(systemName: "chart.xyaxis.line")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .frame(width: 18, height: 48)
-                            .overlay(WindowDraggingArea())
-                            .help(store.isPreview ? "A股行情 · 测试预览" : "A股桌面行情")
+                        if store.selectedList == .holdings {
+                            toolButton("list.bullet", help: store.isCompactMode ? "切换到丰富模式" : "切换到极简模式",
+                                       selected: store.isCompactMode, action: store.toggleCompactMode)
+                        } else {
+                            Image(systemName: "chart.xyaxis.line")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
+                                .frame(width: 18, height: 48)
+                                .overlay(WindowDraggingArea())
+                                .help(store.isPreview ? "A股行情 · 测试预览" : "A股桌面行情")
+                        }
                         HStack(spacing: 10) {
                             ForEach(StockList.allCases, id: \.self) { list in
                                 Button { store.selectList(list) } label: {
@@ -1268,7 +1360,10 @@ struct WidgetView: View {
                                      isDailyKLineRefreshing: store.isDailyKLineRefreshing,
                                      chartNow: store.marketNow,
                                      showIntraday: { intraday(symbol) },
-                                     showDailyKLine: { dailyKLine(symbol) }, expandChart: expandChart)
+                                     showDailyKLine: { dailyKLine(symbol) }, expandChart: expandChart,
+                                     isCompact: store.isCompactMode,
+                                     isCompactExpanded: store.expandedCompactSymbolIDs.contains(symbol.id),
+                                     toggleCompactExpansion: { store.toggleCompactRow(for: symbol) })
                                 .id(symbol.id)
                             if symbol != store.visibleSymbols.last { Divider().padding(.horizontal, 16).opacity(0.6) }
                         }
@@ -1442,6 +1537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     private var glassView: NSVisualEffectView?
     private var statusItem: NSStatusItem!
     private var pinItem: NSMenuItem!
+    private var compactModeItem: NSMenuItem!
     private var autoHideItems: [NSMenuItem] = []
     private var subscriptions: [AnyCancellable] = []
     private var workspaceObservers: [NSObjectProtocol] = []
@@ -1476,6 +1572,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             DispatchQueue.main.async { self?.resizePanel() }
         })
         subscriptions.append(store.$selectedList.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.resizePanel() }
+        })
+        subscriptions.append(store.$isCompactMode.sink { [weak self] value in
+            self?.compactModeItem.state = value ? .on : .off
+            DispatchQueue.main.async { self?.resizePanel() }
+        })
+        subscriptions.append(store.$expandedCompactSymbolIDs.sink { [weak self] _ in
             DispatchQueue.main.async { self?.resizePanel() }
         })
         subscriptions.append(store.$backgroundTransparency.sink { [weak self] value in
@@ -1514,6 +1617,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         addItem("隐藏浮窗", action: #selector(hidePanel), to: menu)
         menu.addItem(.separator())
         addItem("添加股票…", action: #selector(addStock), to: menu)
+        compactModeItem = addItem("持仓股极简模式", action: #selector(toggleCompactMode), to: menu)
         addItem("背景透明度", action: #selector(toggleTransparency), to: menu)
         addItem("启用提醒通知", action: #selector(prepareNotifications), to: menu)
         addItem("立即刷新", action: #selector(refresh), to: menu)
@@ -1691,6 +1795,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         edgeDock?.hide()
     }
     @objc private func refresh() { store.refresh(forceMarket: true) }
+    @objc private func toggleCompactMode() { store.toggleCompactMode() }
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func addStock() {

@@ -214,5 +214,36 @@ func runStockListTests() throws -> Int {
     auction.selectList(.holdings)
     try check(auction.valuationPrice(for: first) == nil && auction.missingAuctionPrice,
               "指数显示方式不改变个股竞价估值规则")
+    let compactDefaults = defaults(holdings: "600108,002580")
+    compactDefaults.set(true, forKey: "compactMode")
+    let compact = store(compactDefaults)
+    try check(compact.listHeight == 57, "重启恢复极简模式，两只股票以单行高度展示")
+    try compact.saveTracking(for: first, cost: "10", quantity: "100", upper: "", lower: "")
+    compact.receive([first.id: quote(first), second.id: quote(second)], requested: compact.symbols, at: now)
+    let savedTracking = compact.tracking
+    try check(compact.listHeight == 57 && compact.totalPositionProfit == 200,
+              "极简行隐藏持仓明细，但保留行情和盈亏计算")
+    compact.toggleCompactRow(for: first)
+    try check(compact.listHeight == 171, "展开一只股票只增加该股票完整卡片的高度")
+    compact.toggleCompactRow(for: second)
+    try check(compact.listHeight == 267 && compact.expandedCompactSymbolIDs == Set([first.id, second.id]),
+              "不同股票可独立展开丰富行情")
+    compact.toggleIntraday(for: second)
+    compact.expandedSymbolID = second.id
+    compact.toggleCompactRow(for: first)
+    try check(compact.expandedChartSymbolID == second.id && compact.expandedSymbolID == second.id,
+              "收起另一行不关闭当前股票的图表和编辑")
+    compact.toggleCompactRow(for: second)
+    try check(compact.expandedChartSymbolID == nil && compact.expandedSymbolID == nil && compact.listHeight == 57,
+              "收起当前行同步关闭图表和编辑并恢复紧凑高度")
+    compact.toggleCompactMode()
+    try check(!store(compactDefaults).isCompactMode && compact.tracking == savedTracking
+              && compact.quotes[first.id]?.price == 12, "模式切换保存偏好并保留持仓与报价")
+    compact.toggleCompactMode()
+    compact.toggleCompactRow(for: second)
+    compact.removeSymbol(second)
+    try check(compact.expandedCompactSymbolIDs.isEmpty && compact.listHeight == 28,
+              "删除展开股票后清理展开状态和高度")
+    try check(!legacy.isCompactMode, "没有保存模式的用户默认保持丰富模式")
     return checks
 }
