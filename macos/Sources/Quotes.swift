@@ -78,6 +78,13 @@ struct Quote: Sendable {
     func valuationPrice(isAuction: Bool) -> Double? {
         isAuction ? bidPrice ?? askPrice : price
     }
+
+    func actualTurnoverPercent(freeFloatShares: Double) -> Double? {
+        guard freeFloatShares.isFinite, freeFloatShares > 0, volumeLots >= 0 else { return nil }
+        let volumeShares = volumeLots * 100
+        let percent = volumeShares / freeFloatShares * 100
+        return percent.isFinite ? percent : nil
+    }
 }
 
 enum QuoteParser {
@@ -181,6 +188,67 @@ final class QuoteClient: Sendable {
             throw QuoteError.httpStatus((response as? HTTPURLResponse)?.statusCode ?? 0)
         }
         return try QuoteParser.parse(data, symbols: normalized)
+    }
+}
+
+final class FreeFloatClient: Sendable {
+    private static let marketIDs = ["sh": "16", "sz": "32", "bj": "151"]
+    private let session: URLSession
+
+    init(makeSession: (URLSessionConfiguration) -> URLSession = { URLSession(configuration: $0) }) {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForResource = 6
+        session = makeSession(configuration)
+    }
+
+    deinit { session.invalidateAndCancel() }
+
+    func fetch(_ symbol: StockSymbol) async -> Double? {
+        guard let marketID = Self.marketIDs[symbol.market],
+              (try? StockSymbol.parseList(symbol.id)) == [symbol] else { return nil }
+        let url = URL(string: "https://stockpage.10jqka.com.cn/stock_page/api/v1/stockpage/quotes/?code=\(symbol.code)&marketId=\(marketID)")!
+        var request = URLRequest(url: url, timeoutInterval: 6)
+        request.setValue("StockDashboard/1.0", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let result = try? JSONDecoder().decode(FreeFloatResponse.self, from: data),
+              result.statusCode == 0,
+              result.data.code == symbol.code,
+              result.data.marketID == marketID,
+              let shares = result.data.quoteData.freeFloatShares,
+              shares.isFinite, shares > 0 else { return nil }
+        return shares
+    }
+
+    private struct FreeFloatResponse: Decodable {
+        let statusCode: Int
+        let data: StockData
+
+        enum CodingKeys: String, CodingKey {
+            case statusCode = "status_code"
+            case data
+        }
+
+        struct StockData: Decodable {
+            let code: String
+            let marketID: String
+            let quoteData: QuoteData
+
+            enum CodingKeys: String, CodingKey {
+                case code, quoteData
+                case marketID = "marketId"
+            }
+        }
+
+        struct QuoteData: Decodable {
+            let freeFloatShares: Double?
+
+            enum CodingKeys: String, CodingKey {
+                case freeFloatShares = "F10-free_circulating_share_capital"
+            }
+        }
     }
 }
 

@@ -40,30 +40,42 @@ private final class RefreshProbe {
 
 private final class RefreshProtocol: URLProtocol {
     static let probe = RefreshProbe()
+    static let freeFloatProbe = RefreshProbe()
     private let lock = NSLock()
     private var finished = false
     private var pending: DispatchWorkItem?
+    private var requestProbe: RefreshProbe {
+        request.url?.host == "stockpage.10jqka.com.cn" ? Self.freeFloatProbe : Self.probe
+    }
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        Self.probe.lock.lock()
-        Self.probe.requests.append((Date(), request.url!.absoluteString))
-        let requestNumber = Self.probe.requests.count
-        Self.probe.active += 1
-        Self.probe.maximumActive = max(Self.probe.maximumActive, Self.probe.active)
-        let delay = Self.probe.delay
-        let failure = Self.probe.failures.isEmpty ? nil : Self.probe.failures.removeFirst()
-        Self.probe.lock.unlock()
+        let probe = requestProbe
+        probe.lock.lock()
+        probe.requests.append((Date(), request.url!.absoluteString))
+        let requestNumber = probe.requests.count
+        probe.active += 1
+        probe.maximumActive = max(probe.maximumActive, probe.active)
+        let delay = probe.delay
+        let failure = probe.failures.isEmpty ? nil : probe.failures.removeFirst()
+        probe.lock.unlock()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.lock.lock()
             guard !self.finished else { self.lock.unlock(); return }
             self.finished = true
             self.lock.unlock()
-            Self.probe.lock.lock(); Self.probe.active -= 1; Self.probe.lock.unlock()
+            probe.lock.lock(); probe.active -= 1; probe.lock.unlock()
             if let failure {
                 self.client?.urlProtocol(self, didFailWithError: URLError(failure))
+                return
+            }
+            if probe === Self.freeFloatProbe {
+                let payload = self.request.url?.query?.contains("code=600108") == true
+                    ? #"{"status_code":0,"data":{"code":"600108","marketId":"16","quoteData":{"F10-free_circulating_share_capital":25000}}}"#
+                    : #"{"status_code":0,"data":{"code":"002580","marketId":"32","quoteData":{}}}"#
+                self.respond(with: Data(payload.utf8))
                 return
             }
             let formatter = DateFormatter()
@@ -80,15 +92,19 @@ private final class RefreshProtocol: URLProtocol {
                 fields[34] = String(10 - Double(requestNumber) / 10)
                 return "v_\(id)=\"\(fields.joined(separator: "~"))\";"
             }.joined(separator: "\n").data(using: .utf8)!
-            self.client?.urlProtocol(self, didReceive: HTTPURLResponse(url: self.request.url!, statusCode: 200,
-                                                                      httpVersion: "HTTP/1.1", headerFields: nil)!,
-                                     cacheStoragePolicy: .notAllowed)
-            self.client?.urlProtocol(self, didLoad: data)
-            self.client?.urlProtocolDidFinishLoading(self)
+            self.respond(with: data)
         }
         lock.lock(); pending = work; let stopped = finished; lock.unlock()
         if stopped { work.cancel() }
         else { DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: work) }
+    }
+
+    private func respond(with data: Data) {
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200,
+                                                              httpVersion: "HTTP/1.1", headerFields: nil)!,
+                            cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
     }
 
     override func stopLoading() {
@@ -98,7 +114,8 @@ private final class RefreshProtocol: URLProtocol {
         pending?.cancel()
         lock.unlock()
         if !wasFinished {
-            Self.probe.lock.lock(); Self.probe.active -= 1; Self.probe.lock.unlock()
+            let probe = requestProbe
+            probe.lock.lock(); probe.active -= 1; probe.lock.unlock()
         }
     }
 }
@@ -112,7 +129,7 @@ func runRefreshTests() throws -> Int {
     func marketDate(_ time: String, day: String = "2026-10-12") -> Date {
         ISO8601DateFormatter().date(from: "\(day)T\(time)+08:00")!
     }
-    func makeStore(at start: Date? = nil) -> QuoteStore {
+    func makeStore(at start: Date? = nil, freeFloatClient: FreeFloatClient? = nil) -> QuoteStore {
         let start = start ?? marketDate("10:00:00")
         let realStart = Date()
         let clock: () -> Date = { start.addingTimeInterval(Date().timeIntervalSince(realStart)) }
@@ -120,7 +137,7 @@ func runRefreshTests() throws -> Int {
         return QuoteStore(defaults: defaults, preview: nil, client: QuoteClient(makeSession: { configuration in
             configuration.protocolClasses = [RefreshProtocol.self]
             return URLSession(configuration: configuration)
-        }), clock: clock)
+        }), freeFloatClient: freeFloatClient, clock: clock)
     }
     func spin(_ seconds: TimeInterval, until condition: () -> Bool = { false }) {
         let end = Date().addingTimeInterval(seconds)
@@ -132,13 +149,20 @@ func runRefreshTests() throws -> Int {
         checks += 1
     }
     RefreshProtocol.probe.reset(delay: 0.02)
-    let normal = makeStore()
+    RefreshProtocol.freeFloatProbe.reset(delay: 1.3)
+    let normal = makeStore(freeFloatClient: FreeFloatClient(makeSession: { configuration in
+        configuration.protocolClasses = [RefreshProtocol.self]
+        return URLSession(configuration: configuration)
+    }))
     defer { normal.stop() }
     normal.start()
-    spin(0.5, until: { normal.quotes.count == 2 })
+    spin(0.5, until: { normal.quotes.count == 2 && RefreshProtocol.freeFloatProbe.snapshot.active > 0 })
     let firstHigh = normal.quotes[normal.symbols[0].id]?.dayHigh
     let firstLow = normal.quotes[normal.symbols[0].id]?.dayLow
     check(firstHigh != nil && firstLow != nil, "首次报价读取当日高低价，无需打开分时图")
+    check(normal.quotes.count == 2 && normal.freeFloatShares.isEmpty &&
+          RefreshProtocol.freeFloatProbe.snapshot.active > 0,
+          "自由流通股本请求进行时，股票报价已可用")
     spin(2.8, until: { RefreshProtocol.probe.snapshot.requests.count >= 3 })
     let regular = RefreshProtocol.probe.snapshot
     check(regular.requests.count >= 3, "启动立即请求并在两秒左右完成三次批量请求")
@@ -160,6 +184,14 @@ func runRefreshTests() throws -> Int {
     normal.start()
     spin(0.2)
     check(RefreshProtocol.probe.snapshot.requests.count == beforeRepeatedStart, "重复start不立即请求或重复启动定时器")
+    spin(1.3, until: {
+        normal.freeFloatShares["sh600108"] == 25_000 && RefreshProtocol.freeFloatProbe.snapshot.active == 0
+    })
+    check(normal.freeFloatShares == ["sh600108": 25_000] &&
+          normal.quotes.count == 2 && normal.errorMessage == nil,
+          "仅保留成功加载的股本，未返回股本的股票仍正常更新行情")
+    check(RefreshProtocol.freeFloatProbe.snapshot.requests.count == 2,
+          "秒级行情刷新复用自由流通股本且不密集重试缺失数据")
     normal.stop()
     spin(0.1, until: { RefreshProtocol.probe.snapshot.active == 0 })
 

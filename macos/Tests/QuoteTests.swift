@@ -29,12 +29,13 @@ enum QuoteTests {
     static func main() async {
         do {
             try runTests()
+            try await runFreeFloatTests()
             let empty = try await QuoteClient().fetch([])
             try expect(empty.isEmpty, "空自选列表应直接返回空结果")
             if CommandLine.arguments.contains("--live") {
-                let symbols = try StockSymbol.parseList("600108,002580")
+                let symbols = try StockSymbol.parseList("600108,002580,002242")
                 let quotes = try await QuoteClient().fetch(symbols)
-                try expect(quotes.count == 2, "实时接口应返回本次指定的两只股票")
+                try expect(quotes.count == symbols.count, "实时接口应返回本次指定的股票")
                 for symbol in symbols {
                     let quote = quotes[symbol.id]!
                     try expect(quote.turnoverPercent.map { $0.isFinite && $0 >= 0 } == true, "实时行情应返回有效换手率：\(symbol.id)")
@@ -42,6 +43,13 @@ enum QuoteTests {
                     try expect(quote.amplitudePercent.map { $0.isFinite && $0 >= 0 } == true, "实时行情应返回有效振幅：\(symbol.id)")
                     print("LIVE: \(symbol.id) \(quote.name) price=\(quote.price) volumeLots=\(quote.volumeLots) amountYuan=\(quote.amountYuan) timestamp=\(quote.timestamp) turnoverPercent=\(quote.turnoverPercent.map { String($0) } ?? "—") volumeRatio=\(quote.volumeRatio.map { String($0) } ?? "—") amplitudePercent=\(quote.amplitudePercent.map { String($0) } ?? "—") dayHigh=\(quote.dayHigh.map { String($0) } ?? "—") dayLow=\(quote.dayLow.map { String($0) } ?? "—") marketCapYuan=\(quote.marketCapYuan.map { String($0) } ?? "—")")
                 }
+                let joyoung = symbols[2]
+                guard let freeFloat = await FreeFloatClient().fetch(joyoung),
+                      let actual = quotes[joyoung.id]?.actualTurnoverPercent(freeFloatShares: freeFloat) else {
+                    throw TestFailure(description: "九阳股份实时行情应能计算实际换手率")
+                }
+                try expect(actual >= 0 && actual.isFinite, "实际换手率应为非负有限数值")
+                print("LIVE: \(joyoung.id) freeFloatShares=\(freeFloat) actualTurnoverPercent=\(actual)")
             }
             print("PASS: \(checks) assertions")
         }
@@ -155,8 +163,36 @@ enum QuoteTests {
         try expect(mixed[symbol.id] == nil && mixed.count == 1, "一个坏行情不应影响同批次有效行情")
         let zeroTrading = try QuoteParser.parse(encoded(fixture(symbol, edits: [36: "0", 37: "0", 57: "0"])), symbols: [symbol])
         try expect(zeroTrading[symbol.id]?.volumeLots == 0 && zeroTrading[symbol.id]?.amountYuan == 0, "真实零成交量和成交额应保留")
+        try expect(zeroTrading[symbol.id]?.actualTurnoverPercent(freeFloatShares: 261_790_352) == 0, "零成交量的实际换手率应保留为0%")
         for data in [Data(), Data("v_pv_none_match=\"1\";".utf8), Data([0xFF, 0xFF]), encoded(fixture(symbol, count: 37)), Data("<html>error</html>".utf8)] {
             try expectError("空、损坏或不完整响应应有可读错误") { _ = try QuoteParser.parse(data, symbols: [symbol]) }
+        }
+    }
+
+    static func runFreeFloatTests() async throws {
+        let joyoung = try StockSymbol.parseList("002242")[0]
+        let quote = try QuoteParser.parse(encoded(fixture(joyoung, name: "九阳股份", edits: [36: "1718365", 38: "22.56"])), symbols: [joyoung])[joyoung.id]!
+        let client = FreeFloatClient { configuration in
+            configuration.protocolClasses = [FreeFloatTestProtocol.self]
+            return URLSession(configuration: configuration)
+        }
+        let freeFloat = await client.fetch(joyoung)
+        try expect(freeFloat == 261_790_352, "应读取自由流通股本，单位为股")
+        let actual = freeFloat.flatMap { quote.actualTurnoverPercent(freeFloatShares: $0) }
+        try expect(abs((actual ?? 0) - 65.638973586) < 0.000001, "实际换手率应将成交手数换为股数后除以自由流通股本")
+        try expect(quote.actualTurnoverPercent(freeFloatShares: 100_000_000) ?? 0 > 100, "实际换手率允许超过100%")
+        for shares in [0, -1, .infinity, .nan] as [Double] {
+            try expect(quote.actualTurnoverPercent(freeFloatShares: shares) == nil, "自由流通股本必须为正有限数值")
+        }
+        for input in ["600108", "920001"] {
+            let symbol = try StockSymbol.parseList(input)[0]
+            let shares = await client.fetch(symbol)
+            try expect(shares == 100_000_000, "沪市和北交所代码应匹配各自的市场编号")
+        }
+        for input in ["002243", "002244", "002245", "002246"] {
+            let symbol = try StockSymbol.parseList(input)[0]
+            let shares = await client.fetch(symbol)
+            try expect(shares == nil, "股本缺失、行情代码不符或请求失败时应返回空值：\(input)")
         }
     }
 
@@ -269,4 +305,36 @@ enum QuoteTests {
         try expect(duplicate.bidPrice == 1272.56 && duplicate.askPrice == 1273.78,
                    "同批次相同源时间报价应采用后出现的盘口更新")
     }
+}
+
+private final class FreeFloatTestProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.query ?? ""
+        let code: String
+        let market: String
+        let shares: String
+        switch query {
+        case "code=002242&marketId=32": (code, market, shares) = ("002242", "32", "261790352")
+        case "code=600108&marketId=16": (code, market, shares) = ("600108", "16", "100000000")
+        case "code=920001&marketId=151": (code, market, shares) = ("920001", "151", "100000000")
+        case "code=002243&marketId=32": (code, market, shares) = ("002243", "32", "null")
+        case "code=002244&marketId=32": (code, market, shares) = ("002242", "32", "261790352")
+        case "code=002245&marketId=32": (code, market, shares) = ("002245", "16", "261790352")
+        default:
+            client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+            return
+        }
+        let payload = """
+        {"status_code":0,"data":{"code":"\(code)","marketId":"\(market)","quoteData":{"F10-free_circulating_share_capital":\(shares),"F10-flow_capital_a":761765625}}}
+        """
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(payload.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

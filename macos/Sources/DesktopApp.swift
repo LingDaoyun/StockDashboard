@@ -30,6 +30,7 @@ final class QuoteStore: ObservableObject {
     }
     @Published private(set) var expandedCompactSymbolIDs: Set<String> = []
     @Published private(set) var quotes: [String: Quote] = [:]
+    @Published private(set) var freeFloatShares: [String: Double] = [:]
     @Published private(set) var unavailable: Set<String> = []
     @Published private(set) var lastReceipt: Date?
     @Published private(set) var errorMessage: String?
@@ -71,6 +72,8 @@ final class QuoteStore: ObservableObject {
     let isPreview: Bool
     private var timer: Timer?
     private var request: Task<Void, Never>?
+    private var freeFloatRequest: Task<Void, Never>?
+    private var nextFreeFloatAttempt: [String: Date] = [:]
     private var marketRequest: Task<Void, Never>?
     private var lastMarketAttempt: Date?
     private var intradayRequest: Task<Void, Never>?
@@ -85,6 +88,7 @@ final class QuoteStore: ObservableObject {
     private let marketClient: (any MarketOverviewFetching)?
     private let intradayClient: (any IntradayFetching)?
     private let dailyKLineClient: (any DailyKLineFetching)?
+    private let freeFloatClient: FreeFloatClient?
     private let clock: () -> Date
     private var undecodableTracking: [String: TrackingJSONValue] = [:]
     private var backedUpCorruptTracking = false
@@ -122,11 +126,13 @@ final class QuoteStore: ObservableObject {
     init(defaults: UserDefaults, preview: String?, client: QuoteClient = QuoteClient(),
          marketClient: (any MarketOverviewFetching)? = nil,
          intradayClient: (any IntradayFetching)? = nil,
-         dailyKLineClient: (any DailyKLineFetching)? = nil, clock: @escaping () -> Date = Date.init) {
+         dailyKLineClient: (any DailyKLineFetching)? = nil,
+         freeFloatClient: FreeFloatClient? = nil, clock: @escaping () -> Date = Date.init) {
         self.client = client
         self.marketClient = marketClient
         self.intradayClient = intradayClient
         self.dailyKLineClient = dailyKLineClient
+        self.freeFloatClient = freeFloatClient
         self.clock = clock
         self.marketNow = clock()
         self.defaults = defaults
@@ -464,6 +470,8 @@ final class QuoteStore: ObservableObject {
         defaults.set(codeText, forKey: "symbols")
         let ids = Set(allSymbols.map(\.id))
         quotes = quotes.filter { ids.contains($0.key) }
+        freeFloatShares = freeFloatShares.filter { ids.contains($0.key) }
+        nextFreeFloatAttempt = nextFreeFloatAttempt.filter { ids.contains($0.key) }
         openingAuctionHistory.retainSymbols(ids)
         let savedIDs = Set((symbols + legacyWatchlistSymbols).map(\.id))
         tracking = tracking.filter { savedIDs.contains($0.key) }
@@ -492,6 +500,8 @@ final class QuoteStore: ObservableObject {
         request?.cancel()
         request = nil
         isRefreshing = false
+        freeFloatRequest?.cancel()
+        freeFloatRequest = nil
         marketRequest?.cancel()
         marketRequest = nil
         isMarketRefreshing = false
@@ -538,6 +548,7 @@ final class QuoteStore: ObservableObject {
         refreshMarket(force: forceMarket)
         refreshIntraday(force: forceMarket)
         refreshDailyKLine(force: forceMarket)
+        refreshFreeFloat()
         guard !suspended, !allSymbols.isEmpty, !isRefreshing else { return }
         let requested = allSymbols
         isRefreshing = true
@@ -569,6 +580,30 @@ final class QuoteStore: ObservableObject {
             }
             isRefreshing = false
             request = nil
+        }
+    }
+
+    private func refreshFreeFloat() {
+        guard !suspended, let freeFloatClient, freeFloatRequest == nil else { return }
+        let requested = symbols.filter { symbol in
+            !DashboardIndex.symbols.contains(symbol)
+                && (nextFreeFloatAttempt[symbol.id] ?? .distantPast) <= marketNow
+        }
+        guard !requested.isEmpty else { return }
+        freeFloatRequest = Task { [weak self] in
+            await withTaskGroup(of: (StockSymbol, Double?).self) { group in
+                for symbol in requested {
+                    group.addTask { (symbol, await freeFloatClient.fetch(symbol)) }
+                }
+                for await (symbol, shares) in group {
+                    guard !Task.isCancelled, let self, self.symbols.contains(symbol) else { continue }
+                    if self.freeFloatShares[symbol.id] != shares {
+                        self.freeFloatShares[symbol.id] = shares
+                    }
+                    self.nextFreeFloatAttempt[symbol.id] = self.clock().addingTimeInterval(shares == nil ? 300 : 3600)
+                }
+            }
+            if !Task.isCancelled { self?.freeFloatRequest = nil }
         }
     }
 
@@ -812,6 +847,7 @@ struct QuoteRow: View {
     var isCompact = false
     var isCompactExpanded = false
     var toggleCompactExpansion: () -> Void = {}
+    var freeFloatShares: Double?
 
     @State private var isProfitHovered = false
 
@@ -982,7 +1018,8 @@ struct QuoteRow: View {
                 }
                 HStack(spacing: 10) {
                     metric("成交量", value: quote.map { DisplayFormat.magnitude($0.volumeLots, unit: "手") } ?? "—")
-                    metric("换手率", value: quote.flatMap(\.turnoverPercent).map { String(format: "%.2f%%", $0) } ?? "—")
+                    metric("实际换手", value: actualTurnoverText, titleWidth: 40)
+                        .help("当日累计成交股数 ÷ 同花顺自由流通股本 × 100%")
                     metric("成交额", value: quote.map { DisplayFormat.magnitude($0.amountYuan, unit: "元") } ?? "—")
                 }
                 HStack(spacing: 10) {
@@ -1107,6 +1144,11 @@ struct QuoteRow: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .frame(minWidth: 0, maxWidth: .infinity)
+    }
+
+    private var actualTurnoverText: String {
+        guard let freeFloatShares, let value = quote?.actualTurnoverPercent(freeFloatShares: freeFloatShares) else { return "—" }
+        return String(format: "%.2f%%", value)
     }
 }
 
@@ -1375,7 +1417,8 @@ struct WidgetView: View {
                                      showDailyKLine: { dailyKLine(symbol) }, expandChart: expandChart,
                                      isCompact: store.isCompactMode,
                                      isCompactExpanded: store.expandedCompactSymbolIDs.contains(symbol.id),
-                                     toggleCompactExpansion: { store.toggleCompactRow(for: symbol) })
+                                     toggleCompactExpansion: { store.toggleCompactRow(for: symbol) },
+                                     freeFloatShares: store.freeFloatShares[symbol.id])
                                 .id(symbol.id)
                             if symbol != store.visibleSymbols.last {
                                 Divider().padding(.horizontal, 16)
@@ -1574,7 +1617,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
             defaults = UserDefaults(suiteName: domain)!
         } else { defaults = .standard }
         store = QuoteStore(defaults: defaults, preview: preview, marketClient: MarketOverviewClient(),
-                           intradayClient: IntradayClient(), dailyKLineClient: DailyKLineClient())
+                           intradayClient: IntradayClient(), dailyKLineClient: DailyKLineClient(),
+                           freeFloatClient: FreeFloatClient())
         if !store.isPreview {
             notificationCenter = UNUserNotificationCenter.current()
             notificationCenter?.delegate = self
